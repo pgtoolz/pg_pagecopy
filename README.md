@@ -42,43 +42,6 @@ Before pulling, run `pagecopy.check()` locally on the source database to
 list how every index of a relation will be transferred — see
 [Preflight](#preflight-pagecopycheck).
 
-## Preflight: `pagecopy.check`
-
-`pagecopy.check(source_relation)` reads the current database and reports the
-source-side transfer plan per index. It takes no DSN, opens no remote connection,
-and changes nothing. It reads catalogs under `AccessShareLock`, does not read
-relation pages, and does not wait for ordinary INSERT/UPDATE/DELETE writers.
-`pull` still revalidates the target and the current source state before
-transfer: a check passing is not a guarantee that a later pull will succeed.
-
-- `physical` — pages copied as-is, usable right after the transfer;
-- `definition` — recreated from its definition, then marked invalid
-  (`indisvalid=false`, `indisready=false`) and rebuilt with `REINDEX`;
-  `detail` explains why (`index access method hash`, `invalid on source`,
-  or a backing constraint);
-- `error` — the source-side transfer plan is unsupported (unsafe column type,
-  custom opclass, or another catalog restriction).
-
-The first row always describes the relation itself and can report `error`
-for an unsupported heap type. Rows are unordered, so sort by `index_name` for
-a stable listing:
-
-```sql
--- Execute on the source database.
-SELECT * FROM pagecopy.check('public.events')
-ORDER BY index_name;
-```
-
-```text
- index_name    | supported | method     | detail
----------------+-----------+------------+-----------------------------------------------------------
- events_custom | f         | error      | custom opclasses are not supported; only pg_catalog btree opclasses are allowed
- events_hash   | t         | definition | index access method hash
- events_key    | t         | definition | invalid on source
- events_valid  | t         | physical   |
- public.events | t         | physical   |
-```
-
 ## What happens during a transfer
 
 The big picture — the remote `pull` path (`clone` reuses the same machinery
@@ -155,6 +118,34 @@ not a merge. Progress: every 1024 pages a `NOTICE` fires and
 `pg_stat_activity.application_name` shows
 `pg_pagecopy public.events 412/1023MB 40%`.
 
+
+## Preflight: `pagecopy.check`
+
+`pagecopy.check(source_relation)` reads the current database and reports the
+source-side transfer plan per index. It takes no DSN, opens no remote connection,
+and changes nothing. It reads catalogs under `AccessShareLock`, does not read
+relation pages, and does not wait for ordinary INSERT/UPDATE/DELETE writers.
+`pull` still revalidates the target and the current source state before
+transfer: a check passing is not a guarantee that a later pull will succeed.
+
+- `physical` — pages copied as-is, usable right after the transfer;
+- `definition` — recreated from its definition, then marked invalid
+  (`indisvalid=false`, `indisready=false`) and rebuilt with `REINDEX`;
+  `detail` explains why (`index access method hash`, `invalid on source`,
+  or a backing constraint);
+- `error` — the source-side transfer plan is unsupported (unsafe column type,
+  custom opclass, or another catalog restriction).
+
+The first row always describes the relation itself and can report `error`
+for an unsupported heap type. Rows are unordered, so sort by `index_name` for
+a stable listing:
+
+```sql
+-- Execute on the source database.
+SELECT * FROM pagecopy.check('public.events')
+ORDER BY index_name;
+```
+
 ## Limits
 
 - Both sides: same architecture, `BLCKSZ`, alignment, endianness, encoding,
@@ -203,3 +194,12 @@ verified with `verify_heapam` and `bt_index_check(..., heapallindexed=true)`.
 ## License
 
 MIT
+```text
+ index_name    | supported | method     | detail
+---------------+-----------+------------+-----------------------------------------------------------
+ events_custom | f         | error      | custom opclasses are not supported; only pg_catalog btree opclasses are allowed
+ events_hash   | t         | definition | index access method hash
+ events_key    | t         | definition | invalid on source
+ events_valid  | t         | physical   |
+ public.events | t         | physical   |
+```
