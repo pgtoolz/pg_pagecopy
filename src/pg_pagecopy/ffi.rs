@@ -19,11 +19,7 @@ pub unsafe fn require_source_access() -> Result<(), String> {
 }
 
 pub unsafe fn require_target_owner(oid: pg_sys::Oid) -> Result<(), String> {
-    #[cfg(feature = "pg13")]
-    let owned = pg_sys::pg_class_ownercheck(oid, pg_sys::GetUserId());
-    #[cfg(not(feature = "pg13"))]
-    let owned = pg_sys::object_ownercheck(pg_sys::RelationRelationId, oid, pg_sys::GetUserId());
-    if owned {
+    if pc_target_owner(oid) {
         return Ok(());
     }
     Err("target table must be owned by the current user".into())
@@ -97,6 +93,8 @@ struct RawBtreeMetadata {
 
 unsafe extern "C" {
     fn pc_resolve_relation(name: *const c_char) -> pg_sys::Oid;
+    fn pc_target_owner(oid: pg_sys::Oid) -> bool;
+    fn pc_reset_storage(rel: pg_sys::Relation);
     fn pc_flush_relation(rel: pg_sys::Relation);
     fn pc_read_page(
         rel: pg_sys::Relation,
@@ -196,12 +194,12 @@ impl Rel {
         Self(pg_sys::relation_open(oid, lock), oid)
     }
 
-    pub fn as_ptr(&self) -> pg_sys::Relation {
-        self.0
-    }
-
     pub fn oid(&self) -> pg_sys::Oid {
         self.1
+    }
+
+    pub fn reset_storage(&self) {
+        unsafe { pc_reset_storage(self.0) }
     }
 
     pub fn blocks(&self, fork: pg_sys::ForkNumber::Type) -> u32 {

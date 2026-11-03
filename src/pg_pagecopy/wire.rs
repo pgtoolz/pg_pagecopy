@@ -90,6 +90,15 @@ pub struct BtreeMetadata {
     pub expected_all_equal_image: bool,
 }
 
+impl BtreeMetadata {
+    pub fn has_same_physical_layout(&self, other: &Self) -> bool {
+        // Dedup flags belong to the source metapage; newer majors can read older non-dedup pages.
+        self.definition == other.definition
+            && self.shape == other.shape
+            && self.btree_version == other.btree_version
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IndexTransfer {
     Btree(BtreeMetadata),
@@ -821,6 +830,25 @@ mod tests {
             not_null: true,
             dropped: false,
         }
+    }
+
+    #[test]
+    fn btree_layout_allows_dedup_flag_changes_across_majors() {
+        let source = BtreeMetadata {
+            definition: "btree (chunk_id, chunk_seq)".into(),
+            shape: "2|2|t|f|1 2|0 0|pg_catalog.oid_ops,pg_catalog.int4_ops|".into(),
+            btree_version: 4,
+            all_equal_image: false,
+            expected_all_equal_image: false,
+        };
+        let mut target = BtreeMetadata {
+            all_equal_image: true,
+            expected_all_equal_image: true,
+            ..source.clone()
+        };
+        assert!(source.has_same_physical_layout(&target));
+        target.btree_version = 3;
+        assert!(!source.has_same_physical_layout(&target));
     }
 
     fn manifest() -> Manifest {

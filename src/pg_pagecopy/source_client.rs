@@ -101,10 +101,10 @@ impl ServerInfo {
     fn ensure_compatible(&self, target: &Self) -> Result<(), String> {
         let source_major = self.server_version_num / 10000;
         let target_major = target.server_version_num / 10000;
-        let supported = |major| matches!(major, 13 | 16 | 17 | 18);
+        let supported = |major| matches!(major, 13..=18);
         if !supported(source_major) || !supported(target_major) || source_major > target_major {
             return Err(format!(
-                "unsupported PostgreSQL major pair {source_major} -> {target_major}; only same-major and upward transfers among PostgreSQL 13, 16, 17 and 18 are supported"
+                "unsupported PostgreSQL major pair {source_major} -> {target_major}; only same-major and upward transfers among PostgreSQL 13-18 are supported"
             ));
         }
         ensure_equal(
@@ -605,26 +605,38 @@ mod tests {
 
     #[test]
     fn accepts_only_same_major_and_upward_pairs() {
-        for (source_major, target_major) in
-            [(13, 16), (13, 17), (13, 18), (16, 17), (16, 18), (17, 18)]
-        {
-            let target = ServerInfo {
-                server_version_num: target_major * 10000,
-                ..server_info()
-            };
-            let source = ServerInfo {
-                server_version_num: source_major * 10000,
-                ..target.clone()
-            };
-            assert!(source.ensure_compatible(&target).is_ok());
+        for source_major in 13..=18 {
+            for target_major in source_major..=18 {
+                let target = ServerInfo {
+                    server_version_num: target_major * 10000,
+                    ..server_info()
+                };
+                let source = ServerInfo {
+                    server_version_num: source_major * 10000,
+                    ..target.clone()
+                };
+                assert!(source.ensure_compatible(&target).is_ok());
+            }
         }
     }
 
     #[test]
     fn rejects_downgrade_and_unsupported_major_pairs() {
-        for (source_major, target_major) in
-            [(17, 16), (18, 16), (18, 17), (12, 13), (15, 16), (16, 19)]
-        {
+        for source_major in 13..=18 {
+            for target_major in 13..source_major {
+                let target = ServerInfo {
+                    server_version_num: target_major * 10000,
+                    ..server_info()
+                };
+                let source = ServerInfo {
+                    server_version_num: source_major * 10000,
+                    ..target.clone()
+                };
+                let error = source.ensure_compatible(&target).unwrap_err();
+                assert!(error.contains("PostgreSQL major"), "{error}");
+            }
+        }
+        for (source_major, target_major) in [(12, 13), (13, 12), (18, 19), (19, 18)] {
             let target = ServerInfo {
                 server_version_num: target_major * 10000,
                 ..server_info()

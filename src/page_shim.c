@@ -24,6 +24,7 @@
 #include "storage/checksum.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
+#include "utils/acl.h"
 #include "utils/fmgrprotos.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
@@ -67,6 +68,26 @@ pc_resolve_relation(const char *name)
     names = stringToQualifiedNameList(name);
 #endif
     return RangeVarGetRelid(makeRangeVarFromNameList(names), NoLock, true);
+}
+
+bool
+pc_target_owner(Oid relation_oid)
+{
+#if PG_VERSION_NUM >= 160000
+    return object_ownercheck(RelationRelationId, relation_oid, GetUserId());
+#else
+    return pg_class_ownercheck(relation_oid, GetUserId());
+#endif
+}
+
+void
+pc_reset_storage(Relation rel)
+{
+#if PG_VERSION_NUM >= 160000
+    RelationSetNewRelfilenumber(rel, RELPERSISTENCE_PERMANENT);
+#else
+    RelationSetNewRelfilenode(rel, RELPERSISTENCE_PERMANENT);
+#endif
 }
 
 void

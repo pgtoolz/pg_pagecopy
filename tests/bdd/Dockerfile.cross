@@ -19,6 +19,8 @@ RUN touch main.rs postgres.rs steps.rs world.rs \
     && cargo build --release --locked
 
 FROM pg-pagecopy-pg13:dev AS extension13
+FROM pg-pagecopy-pg14:dev AS extension14
+FROM pg-pagecopy-pg15:dev AS extension15
 FROM pg-pagecopy-pg16:dev AS extension16
 FROM pg-pagecopy-pg17:dev AS extension17
 FROM pg-pagecopy-pg18:dev AS extension18
@@ -30,6 +32,24 @@ RUN apt-get update \
 COPY tests/bdd/fixtures.c /tmp/fixtures.c
 RUN cc -shared -fPIC -Wall -Werror \
     -I"$(/usr/lib/postgresql/13/bin/pg_config --includedir-server)" \
+    /tmp/fixtures.c -o /tmp/pc_bdd_fixtures.so
+
+FROM postgres:14-bookworm AS fixtures14
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc postgresql-server-dev-14 \
+    && rm -rf /var/lib/apt/lists/*
+COPY tests/bdd/fixtures.c /tmp/fixtures.c
+RUN cc -shared -fPIC -Wall -Werror \
+    -I"$(/usr/lib/postgresql/14/bin/pg_config --includedir-server)" \
+    /tmp/fixtures.c -o /tmp/pc_bdd_fixtures.so
+
+FROM postgres:15-bookworm AS fixtures15
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc postgresql-server-dev-15 \
+    && rm -rf /var/lib/apt/lists/*
+COPY tests/bdd/fixtures.c /tmp/fixtures.c
+RUN cc -shared -fPIC -Wall -Werror \
+    -I"$(/usr/lib/postgresql/15/bin/pg_config --includedir-server)" \
     /tmp/fixtures.c -o /tmp/pc_bdd_fixtures.so
 
 FROM postgres:16-bookworm AS fixtures16
@@ -64,11 +84,15 @@ ARG SOURCE_PG_VERSION
 ARG TARGET_PG_VERSION
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       postgresql-13 postgresql-16 postgresql-17 postgresql-18 \
-       postgresql-contrib-13 postgresql-contrib-16 postgresql-contrib-17 postgresql-contrib-18 \
+       postgresql-13 postgresql-14 postgresql-15 postgresql-16 postgresql-17 postgresql-18 \
+       postgresql-contrib-13 postgresql-contrib-14 postgresql-contrib-15 postgresql-contrib-16 postgresql-contrib-17 postgresql-contrib-18 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=extension13 /usr/lib/postgresql/13/lib/pg_pagecopy.so /usr/lib/postgresql/13/lib/pg_pagecopy.so
 COPY --from=extension13 /usr/share/postgresql/13/extension/pg_pagecopy* /usr/share/postgresql/13/extension/
+COPY --from=extension14 /usr/lib/postgresql/14/lib/pg_pagecopy.so /usr/lib/postgresql/14/lib/pg_pagecopy.so
+COPY --from=extension14 /usr/share/postgresql/14/extension/pg_pagecopy* /usr/share/postgresql/14/extension/
+COPY --from=extension15 /usr/lib/postgresql/15/lib/pg_pagecopy.so /usr/lib/postgresql/15/lib/pg_pagecopy.so
+COPY --from=extension15 /usr/share/postgresql/15/extension/pg_pagecopy* /usr/share/postgresql/15/extension/
 COPY --from=extension16 /usr/lib/postgresql/16/lib/pg_pagecopy.so /usr/lib/postgresql/16/lib/pg_pagecopy.so
 COPY --from=extension16 /usr/share/postgresql/16/extension/pg_pagecopy* /usr/share/postgresql/16/extension/
 COPY --from=extension17 /usr/lib/postgresql/17/lib/pg_pagecopy.so /usr/lib/postgresql/17/lib/pg_pagecopy.so
@@ -76,6 +100,8 @@ COPY --from=extension17 /usr/share/postgresql/17/extension/pg_pagecopy* /usr/sha
 COPY --from=extension18 /usr/lib/postgresql/18/lib/pg_pagecopy.so /usr/lib/postgresql/18/lib/pg_pagecopy.so
 COPY --from=extension18 /usr/share/postgresql/18/extension/pg_pagecopy* /usr/share/postgresql/18/extension/
 COPY --from=fixtures13 /tmp/pc_bdd_fixtures.so /usr/lib/postgresql/13/lib/
+COPY --from=fixtures14 /tmp/pc_bdd_fixtures.so /usr/lib/postgresql/14/lib/
+COPY --from=fixtures15 /tmp/pc_bdd_fixtures.so /usr/lib/postgresql/15/lib/
 COPY --from=fixtures16 /tmp/pc_bdd_fixtures.so /usr/lib/postgresql/16/lib/
 COPY --from=fixtures17 /tmp/pc_bdd_fixtures.so /usr/lib/postgresql/17/lib/
 COPY --from=fixtures18 /tmp/pc_bdd_fixtures.so /usr/lib/postgresql/18/lib/

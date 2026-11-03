@@ -34,12 +34,24 @@ Feature: Cross-major transfer rejects unsafe physical layouts
 
     Examples:
       | source_major | target_major |
-      | 17           | 16           |
-      | 18           | 16           |
       | 18           | 17           |
+      | 18           | 16           |
+      | 17           | 16           |
+      | 18           | 15           |
+      | 17           | 15           |
+      | 16           | 15           |
+      | 18           | 14           |
+      | 17           | 14           |
+      | 16           | 14           |
+      | 15           | 14           |
+      | 18           | 13           |
+      | 17           | 13           |
+      | 16           | 13           |
+      | 15           | 13           |
+      | 14           | 13           |
 
   Scenario Outline: Different checksum modes are rejected before VACUUM
-    Given a fresh PostgreSQL 16 to 17 pair with source checksums "<source_checksums>" and target checksums "<target_checksums>"
+    Given a fresh PostgreSQL <source_major> to <target_major> pair with source checksums "<source_checksums>" and target checksums "<target_checksums>"
     And the following SQL is executed on "source":
       """
       CREATE EXTENSION pg_pagecopy;
@@ -70,12 +82,40 @@ Feature: Cross-major transfer rejects unsafe physical layouts
       """
 
     Examples:
-      | source_checksums | target_checksums |
-      | enabled          | disabled         |
-      | disabled         | enabled          |
+      | source_major | target_major | source_checksums | target_checksums |
+      | 13           | 14           | disabled          | enabled         |
+      | 13           | 14           | enabled          | disabled         |
+      | 13           | 15           | disabled          | enabled         |
+      | 13           | 15           | enabled          | disabled         |
+      | 13           | 16           | disabled          | enabled         |
+      | 13           | 16           | enabled          | disabled         |
+      | 13           | 17           | disabled          | enabled         |
+      | 13           | 17           | enabled          | disabled         |
+      | 13           | 18           | disabled          | enabled         |
+      | 13           | 18           | enabled          | disabled         |
+      | 14           | 15           | disabled          | enabled         |
+      | 14           | 15           | enabled          | disabled         |
+      | 14           | 16           | disabled          | enabled         |
+      | 14           | 16           | enabled          | disabled         |
+      | 14           | 17           | disabled          | enabled         |
+      | 14           | 17           | enabled          | disabled         |
+      | 14           | 18           | disabled          | enabled         |
+      | 14           | 18           | enabled          | disabled         |
+      | 15           | 16           | disabled          | enabled         |
+      | 15           | 16           | enabled          | disabled         |
+      | 15           | 17           | disabled          | enabled         |
+      | 15           | 17           | enabled          | disabled         |
+      | 15           | 18           | disabled          | enabled         |
+      | 15           | 18           | enabled          | disabled         |
+      | 16           | 17           | disabled          | enabled         |
+      | 16           | 17           | enabled          | disabled         |
+      | 16           | 18           | disabled          | enabled         |
+      | 16           | 18           | enabled          | disabled         |
+      | 17           | 18           | disabled          | enabled         |
+      | 17           | 18           | enabled          | disabled         |
 
-  Scenario Outline: OID-bearing <label> values are rejected by a 16 to 17 transfer
-    Given a fresh PostgreSQL 16 to 17 pair with checksums "disabled"
+  Scenario Outline: OID-bearing <label> values are rejected by a <source_major> to <target_major> transfer
+    Given a fresh PostgreSQL <source_major> to <target_major> pair with checksums "disabled"
     And the following SQL is executed on "source":
       """
       CREATE EXTENSION pg_pagecopy;
@@ -101,17 +141,115 @@ Feature: Cross-major transfer rejects unsafe physical layouts
       """
 
     Examples:
-      | label            | type                | value                       |
-      | enum             | public.mood         | 'happy'::public.mood        |
-      | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
-      | regclass         | regclass            | 'pg_class'::regclass        |
-      | OID              | oid                 | 42                          |
-      | oidvector        | oidvector           | '42 43'::oidvector          |
-      | aclitem          | aclitem             | 'postgres=r/postgres'       |
-      | system composite | pg_class            | NULL::pg_class              |
+      | source_major | target_major | label            | type                | value                       |
+      | 13           | 14           | enum             | public.mood         | 'happy'::public.mood        |
+      | 13           | 14           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 13           | 14           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 13           | 14           | OID              | oid                 | 42                          |
+      | 13           | 14           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 13           | 14           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 13           | 14           | system composite | pg_class            | NULL::pg_class              |
+      | 13           | 15           | enum             | public.mood         | 'happy'::public.mood        |
+      | 13           | 15           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 13           | 15           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 13           | 15           | OID              | oid                 | 42                          |
+      | 13           | 15           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 13           | 15           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 13           | 15           | system composite | pg_class            | NULL::pg_class              |
+      | 13           | 16           | enum             | public.mood         | 'happy'::public.mood        |
+      | 13           | 16           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 13           | 16           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 13           | 16           | OID              | oid                 | 42                          |
+      | 13           | 16           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 13           | 16           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 13           | 16           | system composite | pg_class            | NULL::pg_class              |
+      | 13           | 17           | enum             | public.mood         | 'happy'::public.mood        |
+      | 13           | 17           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 13           | 17           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 13           | 17           | OID              | oid                 | 42                          |
+      | 13           | 17           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 13           | 17           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 13           | 17           | system composite | pg_class            | NULL::pg_class              |
+      | 13           | 18           | enum             | public.mood         | 'happy'::public.mood        |
+      | 13           | 18           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 13           | 18           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 13           | 18           | OID              | oid                 | 42                          |
+      | 13           | 18           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 13           | 18           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 13           | 18           | system composite | pg_class            | NULL::pg_class              |
+      | 14           | 15           | enum             | public.mood         | 'happy'::public.mood        |
+      | 14           | 15           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 14           | 15           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 14           | 15           | OID              | oid                 | 42                          |
+      | 14           | 15           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 14           | 15           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 14           | 15           | system composite | pg_class            | NULL::pg_class              |
+      | 14           | 16           | enum             | public.mood         | 'happy'::public.mood        |
+      | 14           | 16           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 14           | 16           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 14           | 16           | OID              | oid                 | 42                          |
+      | 14           | 16           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 14           | 16           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 14           | 16           | system composite | pg_class            | NULL::pg_class              |
+      | 14           | 17           | enum             | public.mood         | 'happy'::public.mood        |
+      | 14           | 17           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 14           | 17           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 14           | 17           | OID              | oid                 | 42                          |
+      | 14           | 17           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 14           | 17           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 14           | 17           | system composite | pg_class            | NULL::pg_class              |
+      | 14           | 18           | enum             | public.mood         | 'happy'::public.mood        |
+      | 14           | 18           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 14           | 18           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 14           | 18           | OID              | oid                 | 42                          |
+      | 14           | 18           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 14           | 18           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 14           | 18           | system composite | pg_class            | NULL::pg_class              |
+      | 15           | 16           | enum             | public.mood         | 'happy'::public.mood        |
+      | 15           | 16           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 15           | 16           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 15           | 16           | OID              | oid                 | 42                          |
+      | 15           | 16           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 15           | 16           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 15           | 16           | system composite | pg_class            | NULL::pg_class              |
+      | 15           | 17           | enum             | public.mood         | 'happy'::public.mood        |
+      | 15           | 17           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 15           | 17           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 15           | 17           | OID              | oid                 | 42                          |
+      | 15           | 17           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 15           | 17           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 15           | 17           | system composite | pg_class            | NULL::pg_class              |
+      | 15           | 18           | enum             | public.mood         | 'happy'::public.mood        |
+      | 15           | 18           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 15           | 18           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 15           | 18           | OID              | oid                 | 42                          |
+      | 15           | 18           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 15           | 18           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 15           | 18           | system composite | pg_class            | NULL::pg_class              |
+      | 16           | 17           | enum             | public.mood         | 'happy'::public.mood        |
+      | 16           | 17           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 16           | 17           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 16           | 17           | OID              | oid                 | 42                          |
+      | 16           | 17           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 16           | 17           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 16           | 17           | system composite | pg_class            | NULL::pg_class              |
+      | 16           | 18           | enum             | public.mood         | 'happy'::public.mood        |
+      | 16           | 18           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 16           | 18           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 16           | 18           | OID              | oid                 | 42                          |
+      | 16           | 18           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 16           | 18           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 16           | 18           | system composite | pg_class            | NULL::pg_class              |
+      | 17           | 18           | enum             | public.mood         | 'happy'::public.mood        |
+      | 17           | 18           | enum array       | public.mood[]       | ARRAY['happy'::public.mood] |
+      | 17           | 18           | regclass         | regclass            | 'pg_class'::regclass        |
+      | 17           | 18           | OID              | oid                 | 42                          |
+      | 17           | 18           | oidvector        | oidvector           | '42 43'::oidvector          |
+      | 17           | 18           | aclitem          | aclitem             | 'postgres=r/postgres'       |
+      | 17           | 18           | system composite | pg_class            | NULL::pg_class              |
 
-  Scenario: Fast defaults are rejected by a 16 to 17 transfer
-    Given a fresh PostgreSQL 16 to 17 pair with checksums "disabled"
+  Scenario Outline: Fast defaults are rejected by a <source_major> to <target_major> transfer
+    Given a fresh PostgreSQL <source_major> to <target_major> pair with checksums "disabled"
     And the following SQL is executed on "source":
       """
       CREATE EXTENSION pg_pagecopy;
@@ -134,6 +272,24 @@ Feature: Cross-major transfer rejects unsafe physical layouts
       """
       SELECT to_regclass('public.imported_events');
       """
+
+    Examples:
+      | source_major | target_major |
+      | 13           | 14           |
+      | 13           | 15           |
+      | 13           | 16           |
+      | 13           | 17           |
+      | 13           | 18           |
+      | 14           | 15           |
+      | 14           | 16           |
+      | 14           | 17           |
+      | 14           | 18           |
+      | 15           | 16           |
+      | 15           | 17           |
+      | 15           | 18           |
+      | 16           | 17           |
+      | 16           | 18           |
+      | 17           | 18           |
 
   Scenario: Virtual generated columns are rejected instead of being recreated as stored
     Given a fresh PostgreSQL 18 to 18 pair with checksums "disabled"
@@ -163,8 +319,8 @@ Feature: Cross-major transfer rejects unsafe physical layouts
       SELECT to_regclass('public.imported_events');
       """
 
-  Scenario: Collation-version drift is rejected by a 16 to 17 transfer
-    Given a fresh PostgreSQL 16 to 17 pair with checksums "disabled"
+  Scenario Outline: Collation-version drift is rejected by a <source_major> to <target_major> transfer
+    Given a fresh PostgreSQL <source_major> to <target_major> pair with checksums "disabled"
     And the following SQL is executed on "source":
       """
       CREATE EXTENSION pg_pagecopy;
@@ -190,8 +346,26 @@ Feature: Cross-major transfer rejects unsafe physical layouts
       SELECT count(*), min(id), min(payload) FROM public.events;
       """
 
-  Scenario: Unsupported lz4 is rejected by a 16 to 18 transfer
-    Given a fresh PostgreSQL 16 to 18 pair with checksums "disabled"
+    Examples:
+      | source_major | target_major |
+      | 13           | 14           |
+      | 13           | 15           |
+      | 13           | 16           |
+      | 13           | 17           |
+      | 13           | 18           |
+      | 14           | 15           |
+      | 14           | 16           |
+      | 14           | 17           |
+      | 14           | 18           |
+      | 15           | 16           |
+      | 15           | 17           |
+      | 15           | 18           |
+      | 16           | 17           |
+      | 16           | 18           |
+      | 17           | 18           |
+
+  Scenario Outline: Unsupported lz4 is rejected by a <source_major> to <target_major> transfer
+    Given a fresh PostgreSQL <source_major> to <target_major> pair with checksums "disabled"
     And the following SQL is executed on "source":
       """
       CREATE EXTENSION pg_pagecopy;
@@ -220,7 +394,20 @@ Feature: Cross-major transfer rejects unsafe physical layouts
       SELECT count(*), min(id), min(payload) FROM public.events;
       """
 
-  Scenario: A 16 to 17 export rejects a corrupted source page
+    Examples:
+      | source_major | target_major |
+      | 14           | 15           |
+      | 14           | 16           |
+      | 14           | 17           |
+      | 14           | 18           |
+      | 15           | 16           |
+      | 15           | 17           |
+      | 15           | 18           |
+      | 16           | 17           |
+      | 16           | 18           |
+      | 17           | 18           |
+
+  Scenario Outline: A <source_major> to <target_major> export rejects a corrupted source page
     Given a fresh PostgreSQL 16 to 17 pair with checksums "enabled"
     And the following SQL is executed on "source":
       """
@@ -266,3 +453,21 @@ Feature: Cross-major transfer rejects unsafe physical layouts
       """
       SELECT count(*), min(id) FROM public.events;
       """
+
+    Examples:
+      | source_major | target_major |
+      | 13           | 14           |
+      | 13           | 15           |
+      | 13           | 16           |
+      | 13           | 17           |
+      | 13           | 18           |
+      | 14           | 15           |
+      | 14           | 16           |
+      | 14           | 17           |
+      | 14           | 18           |
+      | 15           | 16           |
+      | 15           | 17           |
+      | 15           | 18           |
+      | 16           | 17           |
+      | 16           | 18           |
+      | 17           | 18           |
