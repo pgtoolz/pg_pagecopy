@@ -1,0 +1,72 @@
+name: images
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - Cargo.lock
+      - .github/workflows/images.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository }}
+
+jobs:
+  builders:
+    name: builder-pg${{ matrix.pg }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [16, 17, 18]
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Compute toolchain tag
+        # Toolchain identity = Dockerfile + this workflow. Cargo.lock is
+        # deliberately excluded: dep-prebuild layers self-invalidate via their
+        # own `COPY Cargo.lock` instruction, while apt layers must survive
+        # dependency bumps. The builder is re-pushed with --cache-from so a
+        # Cargo.lock change on main only rebuilds the dep layers.
+        id: tag
+        run: echo "tag=$(cat Dockerfile .github/workflows/images.yml | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        # ghcr.io auth intermittently times out under GHA load; retry the
+        # handshake instead of failing the whole job.
+        run: |
+          for attempt in 1 2 3; do
+            if echo "${{ secrets.GITHUB_TOKEN }}" \
+              | docker login "$REGISTRY" -u '${{ github.actor }}' --password-stdin; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "ghcr login failed after 3 attempts" >&2
+          exit 1
+
+      - name: Build and push builder image
+        run: |
+          image="$REGISTRY/${IMAGE_PREFIX}/builder-pg${{ matrix.pg }}:${{ steps.tag.outputs.tag }}"
+          # BUILDKIT_INLINE_CACHE embeds cache metadata so ci.yml's
+          # --cache-from can actually reuse these layers; without it the
+          # image exists but restores zero layers and every CI run
+          # reinstalls the toolchain from apt. --cache-from the previous
+          # push of the same tag so unchanged layers (apt, cargo-pgrx)
+          # come from the registry and only dep layers rebuild on a
+          # Cargo.lock change.
+          docker build --target toolchain \
+            --cache-from "$image" \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --build-arg PG_VERSION=${{ matrix.pg }} \
+            -t "$image" .
+          docker push "$image"

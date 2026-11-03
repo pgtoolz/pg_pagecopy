@@ -1,0 +1,6 @@
+comment = 'Physical table transfer between PostgreSQL 16-18 clusters, including upward upgrades'
+default_version = '0.0.1'
+module_pathname = '$libdir/pg_pagecopy'
+schema = 'pagecopy'
+relocatable = false
+superuser = true

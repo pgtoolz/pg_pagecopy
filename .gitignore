@@ -1,0 +1,6 @@
+target/
+/.cargo
+/.pi/
+*.pem
+PLAN.md
+docs/
