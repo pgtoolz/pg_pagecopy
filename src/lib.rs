@@ -239,6 +239,42 @@ pub mod pg_pagecopy {
         }
     }
 
+    /// Read-only file inventory for a relation in the current (source)
+    /// database: one row per file of the relation tree (heap, TOAST chain,
+    /// every user index, and the vm/fsm forks of each physically transferred
+    /// object), with its source size in bytes and how it will transfer.
+    /// Uses `AccessShareLock` without reading relation pages or blocking
+    /// writers; `pagecopy.pull` revalidates the target and current source
+    /// state. Forks are never copied: the target starts with empty forks, so
+    /// all-visible bits return only after a target VACUUM. Indexes that
+    /// cannot move as page images transfer as definitions and stay INVALID on
+    /// the target until REINDEX, so their constraints are not enforced until
+    /// then. A relation that cannot transfer at all (view, unlogged,
+    /// partitioned, ...) yields one error row with the same text every
+    /// transfer path fails with: one shared policy, no drift.
+    ///
+    /// # Panics
+    /// Panics if the relation cannot be resolved or its catalog cannot be read.
+    #[must_use]
+    #[pg_extern]
+    pub fn check(
+        source_relation: &str,
+    ) -> TableIterator<
+        'static,
+        (
+            name!(name, String),
+            name!(type, String),
+            name!(supported, bool),
+            name!(method, String),
+            name!(size, i64),
+            name!(detail, String),
+        ),
+    > {
+        let rows = unsafe { exporter::check_index(source_relation) }
+            .unwrap_or_else(|error| panic!("pg_pagecopy: {error}"));
+        TableIterator::new(rows)
+    }
+
     // Installation does not grant raw-page access to every database user.
     // Administrators may grant execute to trusted roles; table ACLs still apply.
     pgrx::extension_sql!(
@@ -253,6 +289,7 @@ REVOKE ALL ON FUNCTION pagecopy_internal.pagecopy_export_schema(text) FROM PUBLI
 REVOKE ALL ON FUNCTION pagecopy.pull(text, text, text, boolean) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pagecopy.pull_server(text, text, text, boolean) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pagecopy.clone(text, text, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pagecopy.check(text) FROM PUBLIC;
 ",
         name = "pagecopy_revoke_public_execute",
         requires = [
@@ -263,7 +300,8 @@ REVOKE ALL ON FUNCTION pagecopy.clone(text, text, boolean) FROM PUBLIC;
             pagecopy_export_schema,
             pull,
             pull_server,
-            clone
+            clone,
+            check
         ]
     );
 }

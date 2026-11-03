@@ -404,7 +404,7 @@ Feature: Transfer validation and failure isolation
       );
       INSERT INTO public.events VALUES (42, 'keep', 'old');
       """
-    Then the following SQL on "target" fails with "source must be a plain logged table":
+    Then the following SQL on "target" fails with "unlogged table: only plain logged tables transfer":
       """
       SELECT pagecopy.pull(
         'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
@@ -465,39 +465,29 @@ Feature: Transfer validation and failure isolation
       WHERE c.relname = 'events_id_hash';
       """
 
-  Scenario: Unsupported unique index cannot be degraded
+  Scenario: Exclusion constraint degrades to an invalid definition
     When the following SQL is executed on "source":
       """
-      CREATE UNIQUE INDEX events_note_key ON public.events (note) WHERE note IS NOT NULL;
-      """
-    Then the following SQL on "target" fails with "cannot be degraded":
-      """
-      SELECT pagecopy.pull(
-        'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
-        'public.events', 'public.events', true
-      );
-      """
-    And the following SQL on "target" returns "NULL":
-      """
-      SELECT to_regclass('public.events');
-      """
-
-  Scenario: Exclusion index cannot be degraded
-    When the following SQL is executed on "source":
-      """
+      INSERT INTO public.events VALUES (1, 'source', 'new');
       ALTER TABLE public.events
         ADD CONSTRAINT events_note_excl EXCLUDE USING btree (note WITH =);
       """
-    Then the following SQL on "target" fails with "foreign/exclusion constraints":
+    When the following SQL is executed on "target":
       """
       SELECT pagecopy.pull(
         'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
         'public.events', 'public.events', true
       );
       """
-    And the following SQL on "target" returns "NULL":
+    Then the following SQL on "target" returns "1|f|f|1":
       """
-      SELECT to_regclass('public.events');
+      SELECT (SELECT count(*) FROM public.events),
+             (SELECT indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+              WHERE c.relname = 'events_note_excl'),
+             (SELECT indisready FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+              WHERE c.relname = 'events_note_excl'),
+             (SELECT count(*) FROM pg_constraint
+              WHERE conrelid = 'public.events'::regclass AND contype = 'x');
       """
 
   Scenario: Offline source leaves destination unchanged

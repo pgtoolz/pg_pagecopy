@@ -226,6 +226,66 @@ impl Rel {
         }
     }
 
+    // c_char is u8 on Linux and i8 on macOS; relkind and persistence are ASCII.
+    #[allow(clippy::unnecessary_cast, clippy::cast_sign_loss)]
+    fn catalog_char(value: std::os::raw::c_char) -> char {
+        value as u8 as char
+    }
+
+    /// Catalog relkind byte as a char: `r`, `v`, `p`, ...
+    fn relkind_char(&self) -> char {
+        unsafe { Self::catalog_char((*(*self.0).rd_rel).relkind) }
+    }
+
+    fn persistence_char(&self) -> char {
+        unsafe { Self::catalog_char((*(*self.0).rd_rel).relpersistence) }
+    }
+
+    /// `None` for a plain logged table; otherwise its readable type name and
+    /// the shared reason a physical transfer is impossible. `pagecopy.check`
+    /// reports the type and every transfer path fails with the same text, so
+    /// the policy lives in exactly one place.
+    pub fn plain_logged_reason(&self) -> Option<(String, String)> {
+        if self.is_plain_logged_table() {
+            return None;
+        }
+        let kind = self.relkind_char();
+        let (what, partitioned) = match kind {
+            'p' => ("partitioned table", true),
+            'v' => ("view", false),
+            'm' => ("materialized view", false),
+            'S' => ("sequence", false),
+            'f' => ("foreign table", false),
+            'c' => ("composite type", false),
+            'i' => ("index", false),
+            'r' => {
+                if self.persistence_char() == 't' {
+                    ("temporary table", false)
+                } else {
+                    ("unlogged table", false)
+                }
+            }
+            other => {
+                return Some((
+                    format!("relkind {other}"),
+                    format!("relkind {other}: only plain logged tables transfer"),
+                ))
+            }
+        };
+        let reason = if partitioned {
+            Self::partitioned_reason()
+        } else {
+            format!("{what}: only plain logged tables transfer")
+        };
+        Some((what.to_owned(), reason))
+    }
+
+    /// Same policy for partitioned tables, reported separately because the
+    /// remedy differs: transfer each partition on its own.
+    pub fn partitioned_reason() -> String {
+        "partitioned: transfer partitions individually".to_owned()
+    }
+
     #[allow(clippy::cast_possible_wrap)]
     pub fn is_btree_am(&self) -> bool {
         unsafe {
@@ -243,8 +303,9 @@ impl Rel {
                 && !relation.rd_index.is_null()
                 && (*relation.rd_index).indisvalid
                 && (*relation.rd_index).indisready
-                && relation.rd_indpred.is_null()
-                && relation.rd_indexprs.is_null()
+                // Partial predicates and key expressions live in the catalog
+                // (pg_index.indpred/indexprs) and in pg_get_indexdef output;
+                // page images themselves are plain btree either way.
                 && !(*relation.rd_index).indisexclusion
         }
     }
@@ -255,15 +316,30 @@ impl Rel {
         }
     }
 
-    /// Only optional secondary indexes may be left invalid for a later REINDEX.
-    pub fn can_degrade(&self) -> bool {
+    /// Why an index cannot transfer as page images; `None` when it can.
+    /// Complements `is_btree`: every condition checked here fails that gate.
+    pub fn non_physical_reason(&self) -> Option<String> {
         unsafe {
-            let relation = &*self.0;
-            !relation.rd_index.is_null()
-                && !(*relation.rd_index).indisprimary
-                && !(*relation.rd_index).indisunique
-                && !(*relation.rd_index).indisexclusion
-                && !(*relation.rd_index).indisreplident
+            if !self.is_btree_am() {
+                return Some(format!(
+                    "index access method {}",
+                    access_method_name((*(*self.0).rd_rel).relam)
+                ));
+            }
+            if (*self.0).rd_index.is_null() {
+                return Some("not an index".into());
+            }
+            let index = &*(*self.0).rd_index;
+            if index.indisexclusion {
+                return Some("exclusion constraint".into());
+            }
+            if !index.indisvalid {
+                return Some("invalid on source".into());
+            }
+            if !index.indisready {
+                return Some("not ready on source".into());
+            }
+            None
         }
     }
 
@@ -504,8 +580,55 @@ impl Drop for Rel {
     }
 }
 
+/// Name of an access method OID for classification messages; the raw OID is
+/// the fallback when the catalog row cannot be read.
+fn access_method_name(relam: pg_sys::Oid) -> String {
+    Spi::get_one_with_args::<String>(
+        "SELECT a.amname::text FROM pg_catalog.pg_am a WHERE a.oid = $1",
+        &[relam.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| relam.to_u32().to_string())
+}
+
 pub fn data_checksums_enabled() -> bool {
     unsafe { pg_sys::DataChecksumsEnabled() }
+}
+
+/// Size in bytes of one relation fork on disk: `main`, `vm`, or `fsm`.
+/// Catalog and smgr metadata only; no page contents are read.
+pub fn fork_size(oid: pg_sys::Oid, fork: &str) -> Result<i64, String> {
+    Spi::get_one_with_args::<i64>(
+        &format!("SELECT pg_relation_size($1::regclass, '{fork}')"),
+        &[oid.into()],
+    )
+    .map_err(|error| format!("read {fork} size: {error}"))?
+    .ok_or_else(|| format!("relation {oid} lost while reading {fork} size"))
+}
+
+/// Schema-qualified name of a relation OID for `pagecopy.check` rows.
+pub fn qualified_name(oid: pg_sys::Oid) -> Result<String, String> {
+    Spi::get_one_with_args::<String>(
+        "SELECT format('%s.%s', quote_ident(n.nspname), quote_ident(c.relname)) \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.oid = $1",
+        &[oid.into()],
+    )
+    .map_err(|error| format!("read relation name: {error}"))?
+    .ok_or_else(|| format!("relation {oid} lost while reading its name"))
+}
+
+/// The single chunk index of a TOAST relation.
+pub fn toast_index_oid(toast_oid: pg_sys::Oid) -> pg_sys::Oid {
+    Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT indexrelid FROM pg_catalog.pg_index WHERE indrelid = $1",
+        &[toast_oid.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(pg_sys::Oid::INVALID)
 }
 
 const CANONICAL_SQL_SETTINGS: [(&str, &str); 4] = [
@@ -573,16 +696,7 @@ pub fn ensure_no_custom_opclass(oid: pg_sys::Oid) -> Result<(), String> {
 }
 
 #[allow(clippy::too_many_lines)] // Keep index catalog identity and default-collation checks together.
-pub fn index_metadata(oid: pg_sys::Oid) -> Result<wire::BtreeMetadata, String> {
-    let unsupported = Spi::get_one_with_args::<bool>(
-        "SELECT (SELECT indexprs IS NOT NULL OR indpred IS NOT NULL FROM pg_index WHERE indexrelid = $1)",
-        &[oid.into()],
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "index catalog metadata is missing".to_owned())?;
-    if unsupported {
-        return Err("expression and partial indexes are not supported".into());
-    }
+pub fn index_catalog_metadata(oid: pg_sys::Oid) -> Result<(String, String), String> {
     ensure_no_custom_opclass(oid)?;
     let default_identity_missing = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS ( \
@@ -657,11 +771,16 @@ pub fn index_metadata(oid: pg_sys::Oid) -> Result<wire::BtreeMetadata, String> {
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "index catalog metadata is missing".to_owned())?;
+    Ok((index_definition(oid)?, shape))
+}
+
+pub fn index_metadata(oid: pg_sys::Oid) -> Result<wire::BtreeMetadata, String> {
+    let (definition, shape) = index_catalog_metadata(oid)?;
     let rel = unsafe { Rel::open(oid, pg_sys::ShareLock.cast_signed()) };
     let mut raw = RawBtreeMetadata::default();
     unsafe { guard(|| pc_btree_metadata(rel.0, &raw mut raw)) };
     Ok(wire::BtreeMetadata {
-        definition: index_definition(oid)?,
+        definition,
         shape,
         btree_version: raw.version,
         all_equal_image: raw.all_equal_image,

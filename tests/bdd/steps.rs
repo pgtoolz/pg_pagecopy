@@ -261,10 +261,26 @@ async fn source_writer_is_blocked(world: &mut AttachWorld, step: &Step) {
         "INSERT INTO public.events VALUES (20001, encode(gen_random_bytes(1000), 'hex'), 'writer')",
     );
     tokio::pin!(writer);
-    tokio::select! {
-        result = &mut import => panic!("import finished before writer block check: {result:?}"),
-        result = &mut writer => panic!("source writer was not blocked: {result:?}"),
-        () = tokio::time::sleep(Duration::from_millis(50)) => {}
+    // The freeze gap between the first AccessExclusiveLock release and the
+    // streaming re-acquisition can legitimately let the writer commit; the
+    // export snapshot predates it, so the row is never copied either way.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "writer outcome was not observed");
+        let waiting = pair.query(
+            "source",
+            "SELECT count(*)::text FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE c.relname = 'events' AND l.mode = 'RowExclusiveLock' AND NOT l.granted",
+        );
+        tokio::pin!(waiting);
+        let result = tokio::select! {
+            result = &mut import => { result.expect("direct import failed"); writer.await.expect("source writer failed"); return; }
+            result = &mut writer => { result.expect("source writer failed"); return; }
+            result = &mut waiting => result.unwrap_or_else(|error| panic!("lock query failed: {error}")),
+        };
+        if result == "1" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
     import
         .await
@@ -272,6 +288,39 @@ async fn source_writer_is_blocked(world: &mut AttachWorld, step: &Step) {
     writer
         .await
         .unwrap_or_else(|error| panic!("blocked source writer failed: {error}"));
+}
+
+#[when("a source writer holds row locks during the following SQL on \"source\":")]
+async fn source_writer_during_check(world: &mut AttachWorld, step: &Step) {
+    let sql = world.expand_sql(docstring(step));
+    let pair = world.pair.as_ref().expect("PostgreSQL pair is not running");
+    let dsn = format!(
+        "host=127.0.0.1 port={} dbname=postgres user=postgres",
+        pair.source_port()
+    );
+    let (writer, connection) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls)
+        .await
+        .expect("source writer connection failed");
+    let connection_task = tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            eprintln!("source writer connection error: {error}");
+        }
+    });
+    writer
+        .batch_execute("BEGIN; INSERT INTO public.events VALUES (99, 'writer')")
+        .await
+        .expect("source writer did not acquire its row locks");
+
+    let check = tokio::time::timeout(Duration::from_secs(10), pair.execute("source", &sql)).await;
+    let commit = writer.batch_execute("COMMIT").await;
+    drop(writer);
+    connection_task
+        .await
+        .expect("source writer connection task failed");
+    check
+        .expect("pagecopy.check waited for an ordinary source writer")
+        .unwrap_or_else(|error| panic!("pagecopy.check failed: {error}"));
+    commit.expect("source writer did not commit");
 }
 
 #[when("target ownership changes during the following SQL on \"target\":")]

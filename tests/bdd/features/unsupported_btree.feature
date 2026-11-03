@@ -50,8 +50,6 @@ Feature: Currently unsupported Btree variants remain rebuildable
 
     Examples:
       | name                    | setup | source_state |
-      | partial Btree           | CREATE INDEX events_unsupported ON public.events USING btree (note) WHERE note IS NOT NULL; | t:t |
-      | expression Btree        | CREATE INDEX events_unsupported ON public.events USING btree (lower(note)); | t:t |
       | invalid Btree           | CREATE FUNCTION pc_test_empty_index_state(regclass, boolean, boolean) RETURNS void AS 'pc_bdd_fixtures', 'pc_test_empty_index_state' LANGUAGE C STRICT; CREATE INDEX events_unsupported ON public.events USING btree (note); SELECT pc_test_empty_index_state('events_unsupported', false, false); | f:f |
       | invalid but ready Btree | CREATE INDEX events_unsupported ON public.events USING btree (note); UPDATE pg_index SET indisvalid = false, indisready = true WHERE indexrelid = 'events_unsupported'::regclass; | f:t |
       | not-ready Btree         | CREATE FUNCTION pc_test_empty_index_state(regclass, boolean, boolean) RETURNS void AS 'pc_bdd_fixtures', 'pc_test_empty_index_state' LANGUAGE C STRICT; CREATE INDEX events_unsupported ON public.events USING btree (note); SELECT pc_test_empty_index_state('events_unsupported', true, false); | t:f |
