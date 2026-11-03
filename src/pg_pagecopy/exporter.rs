@@ -6,9 +6,9 @@ use pgrx::iter::SetOfIterator;
 use pgrx::pg_sys;
 use pgrx::spi::Spi;
 
-/// Push the main, FSM and VM entries of one relation: the export protocol
-/// guarantees the source is fully frozen before pages stream, so its visibility
-/// map is exact for the byte-identical destination heap.
+/// Push the main, FSM and VM entries of one relation. Remote transfers are
+/// frozen first; local clones preserve the source xids, so the copied
+/// visibility-map bits remain exact in both modes.
 unsafe fn push_relation(
     relations: &mut Vec<Relation>,
     oid: pg_sys::Oid,
@@ -108,9 +108,9 @@ unsafe fn toast_index_verdict<T>(
 /// One `pagecopy.check` result row: name, type, supported, method, size, detail.
 type CheckRow = (String, String, bool, String, i64, String);
 
-/// Fork rows exist only while the source file exists; the transfer never
-/// copies them, and the target starts with empty forks.
-const FORK_DETAIL: &str = "not copied; target starts empty";
+/// Fork rows exist only while the source file exists; both forks are copied
+/// byte-identically together with their owning relation.
+const FORK_DETAIL: &str = "copied byte-identically with the relation";
 
 fn fork_rows(name: &str, oid: pg_sys::Oid) -> Result<Vec<CheckRow>, String> {
     let mut rows = Vec::new();
@@ -123,7 +123,7 @@ fn fork_rows(name: &str, oid: pg_sys::Oid) -> Result<Vec<CheckRow>, String> {
                 name.to_owned(),
                 fork.to_owned(),
                 true,
-                "none".to_owned(),
+                "physical".to_owned(),
                 size,
                 FORK_DETAIL.to_owned(),
             ));
@@ -220,6 +220,7 @@ pub unsafe fn check_index(source_table: &str) -> Result<Vec<CheckRow>, String> {
     let heap = source
         .attributes()
         .and_then(|attributes| wire::validate_attributes(&attributes));
+    let heap_valid = heap.is_ok();
     let heap_size = ffi::fork_size(source_oid, "main")?;
     let mut rows = vec![match heap {
         Ok(()) => (
@@ -239,7 +240,9 @@ pub unsafe fn check_index(source_table: &str) -> Result<Vec<CheckRow>, String> {
             reason,
         ),
     }];
-    rows.extend(fork_rows(source_table, source_oid)?);
+    if heap_valid {
+        rows.extend(fork_rows(source_table, source_oid)?);
+    }
     let toast_oid = source.toast_oid();
     if toast_oid != pg_sys::Oid::INVALID {
         rows.extend(toast_rows(toast_oid)?);
@@ -279,6 +282,32 @@ pub unsafe fn check_index(source_table: &str) -> Result<Vec<CheckRow>, String> {
         }
     }
     Ok(rows)
+}
+
+/// Freeze horizons of a relation straight from `pg_class`, captured while the
+/// export transaction holds the source lock so a concurrent VACUUM cannot
+/// advance them past the copied pages.
+fn pg_class_horizons(oid: pg_sys::Oid) -> Result<wire::FreezeHorizons, String> {
+    let relfrozenxid = Spi::get_one::<i64>(&format!(
+        "SELECT relfrozenxid::text::bigint FROM pg_class WHERE oid = {}",
+        oid.to_u32()
+    ))
+    .map_err(|error| format!("read pg_class freeze horizons: {error}"))?
+    .ok_or_else(|| format!("relation {oid} vanished while reading freeze horizons"))?;
+    let relminmxid = Spi::get_one::<i64>(&format!(
+        "SELECT relminmxid::text::bigint FROM pg_class WHERE oid = {}",
+        oid.to_u32()
+    ))
+    .map_err(|error| format!("read pg_class freeze horizons: {error}"))?
+    .ok_or_else(|| format!("relation {oid} vanished while reading freeze horizons"))?;
+    let relfrozenxid = u32::try_from(relfrozenxid)
+        .map_err(|_| format!("relfrozenxid out of range for relation {oid}"))?;
+    let relminmxid = u32::try_from(relminmxid)
+        .map_err(|_| format!("relminmxid out of range for relation {oid}"))?;
+    Ok(wire::FreezeHorizons {
+        relfrozenxid,
+        relminmxid,
+    })
 }
 
 pub unsafe fn build_manifest(
@@ -342,6 +371,13 @@ pub unsafe fn build_manifest(
         }
     }
 
+    let source_horizons = pg_class_horizons(source_oid)?;
+    let toast_horizons = if source_toast == pg_sys::Oid::INVALID {
+        None
+    } else {
+        Some(pg_class_horizons(source_toast)?)
+    };
+
     Ok(Manifest {
         source_table: source_table.to_owned(),
         target_table: target_table.to_owned(),
@@ -350,6 +386,8 @@ pub unsafe fn build_manifest(
         relations,
         attributes,
         indexes,
+        source_horizons,
+        toast_horizons,
     })
 }
 
@@ -587,11 +625,14 @@ unsafe fn export_schema_inner(source_table: &str) -> Result<Vec<u8>, String> {
     .map_err(|error| error.to_string())
 }
 
+#[allow(clippy::struct_excessive_bools)] // Independent transfer flags, not a state machine.
 struct ExportState {
     manifest: Manifest,
     source_toast_oid: pg_sys::Oid,
     target_toast_oid: pg_sys::Oid,
     target_lz4_supported: bool,
+    /// Same-cluster transfer: keep original xids, skip frozen validation.
+    local: bool,
     header_pending: bool,
     relation_index: usize,
     block: u32,
@@ -605,6 +646,7 @@ impl ExportState {
         target_toast_oid: pg_sys::Oid,
         target_lz4_supported: bool,
         target_checksums: bool,
+        local: bool,
     ) -> Result<Self, String> {
         let manifest = build_manifest(
             source_table,
@@ -619,6 +661,7 @@ impl ExportState {
             source_toast_oid: source_main.toast_oid(),
             target_toast_oid,
             target_lz4_supported,
+            local,
             header_pending: true,
             relation_index: 0,
             block: 0,
@@ -664,6 +707,7 @@ impl ExportState {
             relation.read_page(fork, self.block, &mut page);
             if fork == MAIN_FORK
                 && matches!(metadata.kind, RelationKind::Main | RelationKind::Toast)
+                && !self.local
             {
                 relation.assert_heap_page_frozen(self.block, &page);
             }
@@ -678,6 +722,7 @@ impl ExportState {
                             && self.source_toast_oid != pg_sys::Oid::INVALID,
                         self.target_lz4_supported,
                         self.manifest.target_checksums,
+                        self.local,
                     ),
                     RelationKind::Index => {
                         Rel::prepare_page(self.block, &mut page, self.manifest.target_checksums);
@@ -712,6 +757,7 @@ pub unsafe fn export_stream(
     target_toast_oid: pg_sys::Oid,
     target_lz4_supported: bool,
     target_checksums: bool,
+    local_transfer: bool,
 ) -> SetOfIterator<'static, Vec<u8>> {
     let mut state = ExportState::new(
         source_table,
@@ -719,6 +765,7 @@ pub unsafe fn export_stream(
         target_toast_oid,
         target_lz4_supported,
         target_checksums,
+        local_transfer,
     )
     .unwrap_or_else(|error| panic!("pg_pagecopy: {error}"));
     SetOfIterator::new(std::iter::from_fn(move || state.next_page()))

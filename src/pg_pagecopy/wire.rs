@@ -214,6 +214,16 @@ pub struct TableSchema {
     pub sequences: Vec<SequenceState>,
 }
 
+/// Freeze horizons copied from the source `pg_class` rows. A cross-cluster
+/// transfer freezes every tuple, so the target can keep its default
+/// horizons; a local (same-cluster) transfer keeps original xids and must
+/// inherit these, or vacuum could assume xids it must still freeze.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FreezeHorizons {
+    pub relfrozenxid: u32,
+    pub relminmxid: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     pub source_table: String,
@@ -223,6 +233,8 @@ pub struct Manifest {
     pub relations: Vec<Relation>,
     pub attributes: Vec<Attribute>,
     pub indexes: Vec<IndexTransfer>,
+    pub source_horizons: FreezeHorizons,
+    pub toast_horizons: Option<FreezeHorizons>,
 }
 
 impl Manifest {
@@ -232,6 +244,11 @@ impl Manifest {
         put_string(&mut out, &self.target_table)?;
         out.push(u8::from(self.source_checksums));
         out.push(u8::from(self.target_checksums));
+        put_u32(&mut out, self.source_horizons.relfrozenxid)?;
+        put_u32(&mut out, self.source_horizons.relminmxid)?;
+        let toast_horizons = self.toast_horizons.unwrap_or_default();
+        put_u32(&mut out, toast_horizons.relfrozenxid)?;
+        put_u32(&mut out, toast_horizons.relminmxid)?;
         put_len(&mut out, self.relations.len(), MAX_RELATIONS, "relations")?;
         for relation in &self.relations {
             put_u32(&mut out, relation.oid)?;
@@ -290,6 +307,15 @@ impl Manifest {
         let target_table = decoder.string()?;
         let source_checksums = decoder.boolean()?;
         let target_checksums = decoder.boolean()?;
+        let source_horizons = FreezeHorizons {
+            relfrozenxid: decoder.u32()?,
+            relminmxid: decoder.u32()?,
+        };
+        let toast_raw = FreezeHorizons {
+            relfrozenxid: decoder.u32()?,
+            relminmxid: decoder.u32()?,
+        };
+        let toast_horizons = (toast_raw != FreezeHorizons::default()).then_some(toast_raw);
         let relation_count = decoder.len(MAX_RELATIONS, "relations")?;
         let mut relations = Vec::with_capacity(relation_count);
         for _ in 0..relation_count {
@@ -351,6 +377,8 @@ impl Manifest {
             relations,
             attributes,
             indexes,
+            source_horizons,
+            toast_horizons,
         })
     }
 }
@@ -499,7 +527,8 @@ pub fn encode_header(manifest: &Manifest) -> Result<Vec<u8>> {
     let manifest = manifest.encode()?;
     let mut output = Vec::with_capacity(HEADER_LEN + manifest.len());
     output.extend_from_slice(&MAGIC);
-    output.extend_from_slice(&1u16.to_be_bytes());
+    // Version 2: freeze horizons joined the manifest after target_checksums.
+    output.extend_from_slice(&2u16.to_be_bytes());
     put_u32(
         &mut output,
         u32::try_from(manifest.len()).map_err(|_| WireError("manifest too large".into()))?,
@@ -537,7 +566,7 @@ impl<R: Read> StreamReader<R> {
         if header[..4] != MAGIC {
             return Err(WireError("bad pg_pagecopy magic".into()));
         }
-        if header[4..6] != 1u16.to_be_bytes() {
+        if header[4..6] != 2u16.to_be_bytes() {
             return Err(WireError("unsupported pg_pagecopy stream version".into()));
         }
         let length = usize::try_from(u32::from_be_bytes(header[6..10].try_into().unwrap()))
@@ -800,6 +829,11 @@ mod tests {
             target_table: "public.events_copy".into(),
             source_checksums: true,
             target_checksums: true,
+            source_horizons: FreezeHorizons {
+                relfrozenxid: 3,
+                relminmxid: 1,
+            },
+            toast_horizons: None,
             relations: vec![Relation {
                 oid: 42,
                 name: "events".into(),
@@ -946,7 +980,7 @@ mod tests {
     fn headers_use_versioned_layout() {
         let header = encode_header(&manifest()).unwrap();
         assert_eq!(HEADER_LEN, 10);
-        assert_eq!(&header[..6], b"PGPC\0\x01");
+        assert_eq!(&header[..6], b"PGPC\0\x02");
         let manifest_length =
             usize::try_from(u32::from_be_bytes(header[6..10].try_into().unwrap())).unwrap();
         assert_eq!(manifest_length, header.len() - HEADER_LEN);

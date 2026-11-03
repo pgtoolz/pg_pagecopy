@@ -245,7 +245,7 @@ void
 pc_prepare_heap_page(Page page, Relation rel, BlockNumber blkno,
                             Oid source_toast_oid, Oid target_toast_oid,
                             bool patch_toast, bool target_lz4_supported,
-                            bool checksums)
+                            bool checksums, bool keep_xids)
 {
     TupleDesc desc = RelationGetDescr(rel);
     Datum *values = NULL;
@@ -269,8 +269,9 @@ pc_prepare_heap_page(Page page, Relation rel, BlockNumber blkno,
             continue;
 
         header = (HeapTupleHeader) PageGetItem(page, itemid);
-        if (!HeapTupleHeaderXminFrozen(header) ||
-            !(header->t_infomask & HEAP_XMAX_INVALID))
+        if (!keep_xids &&
+            (!HeapTupleHeaderXminFrozen(header) ||
+             !(header->t_infomask & HEAP_XMAX_INVALID)))
             ereport(ERROR,
                     (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                      errmsg("pg_pagecopy: block %u contains a tuple that is not frozen; rerun VACUUM (FREEZE)", blkno)));
@@ -286,8 +287,11 @@ pc_prepare_heap_page(Page page, Relation rel, BlockNumber blkno,
                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                          errmsg("pg_pagecopy: fast defaults/missing values are not supported")));
 
-        HeapTupleHeaderSetXmin(header, FrozenTransactionId);
-        HeapTupleHeaderSetXmax(header, InvalidTransactionId);
+        if (!keep_xids)
+        {
+            HeapTupleHeaderSetXmin(header, FrozenTransactionId);
+            HeapTupleHeaderSetXmax(header, InvalidTransactionId);
+        }
 
         if (target_lz4_supported &&
             (!patch_toast || !(header->t_infomask & HEAP_HASEXTERNAL)))
@@ -657,6 +661,18 @@ pc_source_connect(const char *conninfo)
 void
 pc_source_disconnect(PGconn *conn)
 {
+    if (PQtransactionStatus(conn) == PQTRANS_ACTIVE)
+    {
+        PGcancel   *cancel = PQgetCancel(conn);
+        char        error[256];
+
+        if (cancel != NULL)
+        {
+            /* A closed socket alone does not interrupt a running source query. */
+            (void) PQcancel(cancel, error, sizeof(error));
+            PQfreeCancel(cancel);
+        }
+    }
     libpqsrv_disconnect(conn);
 }
 

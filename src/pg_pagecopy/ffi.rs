@@ -37,7 +37,7 @@ pub fn fork_from_wire(fork: u8) -> Result<pg_sys::ForkNumber::Type, String> {
 }
 
 /// Connection string pointing back at this backend's own postmaster, used to
-/// run VACUUM FREEZE outside the import transaction.
+/// run the source lock and export in an independent transaction.
 ///
 /// # Safety
 /// Reads server GUCs and OIDs; runs inside PostgreSQL.
@@ -117,6 +117,7 @@ unsafe extern "C" {
         patch_toast: bool,
         target_lz4_supported: bool,
         checksums: bool,
+        keep_xids: bool,
     );
     fn pc_verify_btree_metapage(page: *mut c_char, all_equal_image: bool) -> bool;
     fn pc_btree_metadata(rel: pg_sys::Relation, metadata: *mut RawBtreeMetadata);
@@ -149,10 +150,11 @@ pub(super) unsafe fn guard<T>(f: impl FnOnce() -> T) -> T {
 }
 
 pub fn resolve_relation(name: &str) -> Result<pg_sys::Oid, String> {
-    let name = std::ffi::CString::new(name).map_err(|_| "relation name contains NUL".to_owned())?;
-    let oid = unsafe { guard(|| pc_resolve_relation(name.as_ptr())) };
+    let c_name =
+        std::ffi::CString::new(name).map_err(|_| "relation name contains NUL".to_owned())?;
+    let oid = unsafe { guard(|| pc_resolve_relation(c_name.as_ptr())) };
     if oid == pg_sys::Oid::INVALID {
-        Err("relation does not exist".to_owned())
+        Err(format!("relation does not exist: {name}"))
     } else {
         Ok(oid)
     }
@@ -532,6 +534,7 @@ impl Rel {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::fn_params_excessive_bools)] // Mirrors the C shim flags exactly.
     pub fn prepare_heap_page(
         &self,
         block: u32,
@@ -541,6 +544,7 @@ impl Rel {
         patch_toast: bool,
         target_lz4_supported: bool,
         checksums: bool,
+        keep_xids: bool,
     ) {
         unsafe {
             guard(|| {
@@ -553,6 +557,7 @@ impl Rel {
                     patch_toast,
                     target_lz4_supported,
                     checksums,
+                    keep_xids,
                 );
             });
         }

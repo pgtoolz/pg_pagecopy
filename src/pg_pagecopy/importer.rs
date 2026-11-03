@@ -608,6 +608,7 @@ pub unsafe fn import(
     source_table: &str,
     target_table: &str,
     generate_wal: bool,
+    local: bool,
 ) -> Result<(), String> {
     let target_for_sequences = qualify_target(target_table)?;
     if let Ok(target_oid) = ffi::resolve_relation(&target_for_sequences) {
@@ -615,7 +616,11 @@ pub unsafe fn import(
     }
     let mut source = SourceClient::connect(source_conninfo)?;
     source.check_compatibility()?;
-    source.prepare_direct(source_table)?;
+    if local {
+        source.prepare_direct_local(source_table)?;
+    } else {
+        source.prepare_direct(source_table)?;
+    }
     let schema = source.schema(source_table)?;
     let targets = open_target(&schema, &target_for_sequences)
         .map_err(|error| format!("open target relations: {error}"))?;
@@ -633,12 +638,13 @@ pub unsafe fn import(
     let target_lz4_supported = ffi::lz4_supported() && !debug_disable_lz4;
     let command =
         format!(
-        "COPY (SELECT pagecopy_internal.pagecopy_export_stream({}, {}, {}::oid, {}, {})) TO STDOUT (FORMAT binary)",
+        "COPY (SELECT pagecopy_internal.pagecopy_export_stream({}, {}, {}::oid, {}, {}, {})) TO STDOUT (FORMAT binary)",
         quote_literal(source_table),
         quote_literal(target_table),
         target_toast_oid.to_u32(),
         if target_lz4_supported { "true" } else { "false" },
         if target_checksums { "true" } else { "false" },
+        if local { "true" } else { "false" },
     );
     let mut state: Option<ImportState> = None;
     let orig_application_name = Spi::get_one_with_args::<String>(
@@ -702,6 +708,9 @@ pub unsafe fn import(
     }
     advance_sequences(&schema, &target_for_sequences)
         .map_err(|error| format!("advance target sequences: {error}"))?;
+    if local {
+        apply_freeze_horizons(&state.manifest, &target_for_sequences, target_toast_oid)?;
+    }
     source.commit()?;
     // On error the whole transaction (and the name change) rolls back; on
     // success the session must keep whatever application_name it had.
@@ -710,6 +719,37 @@ pub unsafe fn import(
         &[orig_application_name.into()],
     )
     .map_err(|error| format!("restore target application_name: {error}"))?;
+    Ok(())
+}
+
+/// A local (same-cluster) transfer keeps original xids, so the new relation
+/// must inherit the source freeze horizons: `pg_class.relfrozenxid` newer than
+/// a copied xid would let vacuum skip freezing it and wraparound could then
+/// truncate its CLOG slot while the tuple is still unfrozen.
+fn apply_freeze_horizons(
+    manifest: &Manifest,
+    target_table: &str,
+    target_toast_oid: pg_sys::Oid,
+) -> Result<(), String> {
+    let target_oid = ffi::resolve_relation(target_table)?;
+    let mut targets = vec![(target_oid, manifest.source_horizons)];
+    if let Some(toast_horizons) = manifest.toast_horizons {
+        if target_toast_oid != pg_sys::Oid::INVALID {
+            targets.push((target_toast_oid, toast_horizons));
+        }
+    }
+    for (oid, horizons) in targets {
+        Spi::get_one_with_args::<i64>(
+            "UPDATE pg_class SET relfrozenxid = $1::text::xid, relminmxid = $2::text::xid \
+             WHERE oid = $3::text::oid RETURNING 1",
+            &[
+                horizons.relfrozenxid.to_string().into(),
+                horizons.relminmxid.to_string().into(),
+                oid.to_u32().to_string().into(),
+            ],
+        )
+        .map_err(|error| format!("set target freeze horizons: {error}"))?;
+    }
     Ok(())
 }
 
@@ -724,34 +764,36 @@ pub unsafe fn import_server(
     generate_wal: bool,
 ) -> Result<(), String> {
     let conninfo = foreign_server_conninfo(server_name)?;
-    import(&conninfo, source_table, target_table, generate_wal)
+    import(&conninfo, source_table, target_table, generate_wal, false)
 }
 
 /// Clone a table inside the current database with no client transport.
 /// Reuses the network import against this backend's own postmaster: the
-/// self connection runs the freeze/lock/flush retry and streams the
-/// pages, this backend only installs them. Building source metadata here
-/// instead would deadlock against the self connection's ACCESS EXCLUSIVE
-/// lock on the source.
+/// self connection runs the lock/flush and streams the pages, this backend
+/// only installs them. Building source metadata here instead would deadlock
+/// against the self connection's ACCESS EXCLUSIVE lock on the source.
+/// Inside one cluster original xids stay valid, so there is no VACUUM FREEZE
+/// here: the target inherits the source freeze horizons instead.
 ///
 /// # Safety
-/// Runs inside PostgreSQL. Emits a NOTICE for the automatic VACUUM (FREEZE).
+/// Runs inside PostgreSQL.
 pub unsafe fn import_local(
     source_table: &str,
     target_table: &str,
     generate_wal: bool,
 ) -> Result<(), String> {
+    ffi::require_source_access()?;
     let source_oid = ffi::resolve_relation(source_table)?;
     if ffi::resolve_relation(target_table) == Ok(source_oid) {
         return Err("target table must differ from the source table".into());
     }
-    pgrx::notice!("pg_pagecopy: VACUUM (FREEZE) {source_table}");
     pgrx::log!("pg_pagecopy: local clone {source_table} -> {target_table}");
     import(
         &ffi::self_conninfo()?,
         source_table,
         target_table,
         generate_wal,
+        true,
     )
 }
 

@@ -439,6 +439,22 @@ impl SourceClient {
         unreachable!("bounded VACUUM FREEZE loop always returns")
     }
 
+    /// Lock and flush a same-cluster source without VACUUM FREEZE: original
+    /// xids stay valid in one cluster, so the transfer keeps them and the
+    /// importer copies the source freeze horizons onto the target instead.
+    pub fn prepare_direct_local(&mut self, source_table: &str) -> Result<(), String> {
+        let literal = format!("'{}'", source_table.replace('\'', "''"));
+        let lock = format!("SELECT pagecopy_internal.pagecopy_lock_source({literal})");
+        self.execute("BEGIN")
+            .map_err(|error| stage_error("begin", &error))?;
+        if let Err(error) = self.execute(&lock) {
+            let _ = self.rollback();
+            return Err(stage_error("lock", &error));
+        }
+        pgrx::log!("pg_pagecopy: source locked and relation tree flushed for local transfer");
+        Ok(())
+    }
+
     pub fn rollback(&mut self) -> Result<(), String> {
         self.execute("ROLLBACK")
             .map_err(|error| stage_error("rollback", &error))
