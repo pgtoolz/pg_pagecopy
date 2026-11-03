@@ -208,8 +208,14 @@ pub mod pg_pagecopy {
         generate_wal: default!(bool, "true"),
     ) {
         unsafe {
-            importer::import(source_conninfo, source_table, target_table, generate_wal)
-                .unwrap_or_else(|error| panic!("pg_pagecopy: {error}"));
+            importer::import(
+                source_conninfo,
+                source_table,
+                target_table,
+                generate_wal,
+                false,
+            )
+            .unwrap_or_else(|error| panic!("pg_pagecopy: {error}"));
         }
     }
 

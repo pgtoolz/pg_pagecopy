@@ -829,6 +829,11 @@ mod tests {
             target_table: "public.events_copy".into(),
             source_checksums: true,
             target_checksums: true,
+            source_horizons: crate::wire::FreezeHorizons {
+                relfrozenxid: 3,
+                relminmxid: 1,
+            },
+            toast_horizons: None,
             relations: vec![Relation {
                 oid: 42,
                 name: "events".into(),

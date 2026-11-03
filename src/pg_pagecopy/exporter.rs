@@ -230,19 +230,25 @@ pub unsafe fn check_index(source_table: &str) -> Result<Vec<CheckRow>, String> {
 /// export transaction holds the source lock so a concurrent VACUUM cannot
 /// advance them past the copied pages.
 fn pg_class_horizons(oid: pg_sys::Oid) -> Result<wire::FreezeHorizons, String> {
-    let sql = format!(
-        "SELECT relfrozenxid::text, relminmxid::text FROM pg_class WHERE oid = {}",
+    let relfrozenxid = Spi::get_one::<i64>(&format!(
+        "SELECT relfrozenxid::text::bigint FROM pg_class WHERE oid = {}",
         oid.to_u32()
-    );
-    let (relfrozenxid, relminmxid) = Spi::get_one::<(String, String)>(&sql)
-        .map_err(|error| format!("read pg_class freeze horizons: {error}"))?;
+    ))
+    .map_err(|error| format!("read pg_class freeze horizons: {error}"))?
+    .ok_or_else(|| format!("relation {oid} vanished while reading freeze horizons"))?;
+    let relminmxid = Spi::get_one::<i64>(&format!(
+        "SELECT relminmxid::text::bigint FROM pg_class WHERE oid = {}",
+        oid.to_u32()
+    ))
+    .map_err(|error| format!("read pg_class freeze horizons: {error}"))?
+    .ok_or_else(|| format!("relation {oid} vanished while reading freeze horizons"))?;
+    let relfrozenxid = u32::try_from(relfrozenxid)
+        .map_err(|_| format!("relfrozenxid out of range for relation {oid}"))?;
+    let relminmxid = u32::try_from(relminmxid)
+        .map_err(|_| format!("relminmxid out of range for relation {oid}"))?;
     Ok(wire::FreezeHorizons {
-        relfrozenxid: relfrozenxid
-            .parse()
-            .map_err(|_| format!("invalid relfrozenxid {relfrozenxid}"))?,
-        relminmxid: relminmxid
-            .parse()
-            .map_err(|_| format!("invalid relminmxid {relminmxid}"))?,
+        relfrozenxid,
+        relminmxid,
     })
 }
 
