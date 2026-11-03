@@ -34,6 +34,10 @@ Same database:
 SELECT pagecopy.clone('public.events', 'public.events_archive');
 ```
 
+`clone` shares the source xid space, so it never runs `VACUUM (FREEZE)`:
+the target inherits the source freeze horizons
+(`pg_class.relfrozenxid`/`relminmxid`) instead.
+
 There is also `pagecopy.pull_server(server_name, ...)` taking a foreign
 server + user mapping instead of a connection string, so credentials do not
 appear in SQL, logs and `pg_stat_activity`.
@@ -96,7 +100,9 @@ Step by step:
 
 1. `VACUUM (FREEZE)` runs on the source, then the table is locked `ACCESS
    EXCLUSIVE` and every tuple is validated as frozen. A racing writer aborts
-   the attempt (up to 3 retries).
+   the attempt (up to 3 retries). A same-cluster `pagecopy.clone` skips this
+   step: the xid space is shared, so pages keep their original xids and the
+   target inherits the source freeze horizons instead.
 2. `FlushRelationBuffers` flushes heap, TOAST and indexes. No cluster-wide
    checkpoint is needed.
 3. Heap, TOAST, btree, visibility-map and free-space-map pages stream to the
