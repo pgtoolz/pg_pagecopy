@@ -6,7 +6,10 @@ on:
       - main
     paths:
       - Dockerfile
+      - Cargo.toml
       - Cargo.lock
+      - build.rs
+      - pg_pagecopy.control
       - .github/workflows/images.yml
   workflow_dispatch:
 
