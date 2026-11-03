@@ -180,6 +180,8 @@ Feature: Unsupported secondary indexes survive as rebuildable definitions
       | name                        | definition |
       | pg_catalog nondefault opclass | (note text_pattern_ops) |
       | explicit collation            | (note COLLATE "C") |
+      | multicolumn desc/nulls        | (id DESC NULLS LAST, note ASC) |
+      | include column                | (id) INCLUDE (note) |
 
   Scenario Outline: Existing target with <name> foreign key is rejected before replacement
     Given a fresh PostgreSQL pair

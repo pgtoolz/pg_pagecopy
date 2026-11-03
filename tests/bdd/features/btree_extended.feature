@@ -139,3 +139,40 @@ Feature: Partial and expression btree indexes transfer as ready pages
         'public.events', 'public.events', true
       );
       """
+
+  Scenario: Multicolumn DESC/NULLS and INCLUDE btree keep ordering and serve index-only scans
+    Given a fresh PostgreSQL pair
+    And the following SQL is executed on "source":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.events (id integer, note text, score integer);
+      CREATE INDEX events_order ON public.events USING btree (score DESC NULLS LAST, note ASC);
+      CREATE INDEX events_cover ON public.events USING btree (score) INCLUDE (note);
+      INSERT INTO public.events VALUES
+        (1, 'Alpha', NULL), (2, 'beta', 3), (3, NULL, 1),
+        (4, 'Gamma', NULL), (5, 'delta', 2);
+      """
+    And the following SQL is executed on "target":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      """
+    When the following SQL is executed on "target":
+      """
+      SELECT pagecopy.pull(
+        'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
+        'public.events', 'public.events', true
+      );
+      """
+    Then the following SQL on "target" returns "2:5:3:1:4|0":
+      """
+      SET enable_seqscan = off;
+      SELECT string_agg(id::text, ':' ORDER BY score DESC NULLS LAST, note),
+             (SELECT count(*) FROM pg_index
+              WHERE indrelid = 'public.events'::regclass AND NOT indisvalid)
+      FROM public.events;
+      """
+    And the following SQL on "target" contains "Index Only Scan":
+      """
+      SET enable_seqscan = off;
+      EXPLAIN (COSTS OFF) SELECT score FROM public.events WHERE score = 3;
+      """
