@@ -87,6 +87,24 @@ unsafe fn classify_index_with<T>(
     }
 }
 
+/// Shared verdict for a source TOAST index: unlike user indexes it can
+/// never degrade to a definition, so a non-btree is a hard error and the
+/// metadata callback decides the rest. `pagecopy.check` reports the same
+/// reasons with a catalog-only callback.
+///
+/// # Safety
+/// Opens the index under `AccessShareLock` until the statement ends.
+unsafe fn toast_index_verdict<T>(
+    toast_index_oid: pg_sys::Oid,
+    metadata: impl FnOnce(pg_sys::Oid) -> Result<T, String>,
+) -> Result<T, String> {
+    let toast_index = Rel::open(toast_index_oid, pg_sys::AccessShareLock.cast_signed());
+    if !toast_index.is_btree() {
+        return Err("source TOAST index is not a supported btree".into());
+    }
+    metadata(toast_index_oid)
+}
+
 /// One `pagecopy.check` result row: name, type, supported, method, size, detail.
 type CheckRow = (String, String, bool, String, i64, String);
 
@@ -126,6 +144,65 @@ fn fork_rows(name: &str, oid: pg_sys::Oid) -> Result<Vec<CheckRow>, String> {
 /// # Safety
 /// Opens source relations under `AccessShareLock` until the statement ends;
 /// blocks concurrent DDL only, never writers.
+/// Rows for the TOAST chain of a heap: the toast table, its index, and
+/// their forks. A missing or unsupported TOAST index keeps the shared
+/// hard-error reasons of the transfer path instead of silently reporting
+/// a transferable chain.
+///
+/// # Safety
+/// Opens source relations under `AccessShareLock` until the statement ends;
+/// catalog-only.
+unsafe fn toast_rows(toast_oid: pg_sys::Oid) -> Result<Vec<CheckRow>, String> {
+    let toast_name = ffi::qualified_name(toast_oid)?;
+    let mut rows = vec![(
+        toast_name.clone(),
+        "toast".to_owned(),
+        true,
+        "physical".to_owned(),
+        ffi::fork_size(toast_oid, "main")?,
+        String::new(),
+    )];
+    rows.extend(fork_rows(&toast_name, toast_oid)?);
+    let toast_index = ffi::toast_index_oid(toast_oid);
+    if toast_index == pg_sys::Oid::INVALID {
+        rows.push((
+            toast_name,
+            "toast index".to_owned(),
+            false,
+            "error".to_owned(),
+            0,
+            "source TOAST relation has no valid index".to_owned(),
+        ));
+        return Ok(rows);
+    }
+    let index_name = ffi::qualified_name(toast_index)?;
+    let size = ffi::fork_size(toast_index, "main")?;
+    match toast_index_verdict(toast_index, |oid| {
+        ffi::index_catalog_metadata(oid).map(|_| ())
+    }) {
+        Ok(()) => {
+            rows.push((
+                index_name.clone(),
+                "toast index".to_owned(),
+                true,
+                "physical".to_owned(),
+                size,
+                String::new(),
+            ));
+            rows.extend(fork_rows(&index_name, toast_index)?);
+        }
+        Err(reason) => rows.push((
+            index_name,
+            "toast index".to_owned(),
+            false,
+            "error".to_owned(),
+            size,
+            reason,
+        )),
+    }
+    Ok(rows)
+}
+
 pub unsafe fn check_index(source_table: &str) -> Result<Vec<CheckRow>, String> {
     ffi::require_source_access()?;
     let source_oid = ffi::resolve_relation(source_table)?;
@@ -165,29 +242,7 @@ pub unsafe fn check_index(source_table: &str) -> Result<Vec<CheckRow>, String> {
     rows.extend(fork_rows(source_table, source_oid)?);
     let toast_oid = source.toast_oid();
     if toast_oid != pg_sys::Oid::INVALID {
-        let toast_name = ffi::qualified_name(toast_oid)?;
-        rows.push((
-            toast_name.clone(),
-            "toast".to_owned(),
-            true,
-            "physical".to_owned(),
-            ffi::fork_size(toast_oid, "main")?,
-            String::new(),
-        ));
-        rows.extend(fork_rows(&toast_name, toast_oid)?);
-        let toast_index = ffi::toast_index_oid(toast_oid);
-        if toast_index != pg_sys::Oid::INVALID {
-            let index_name = ffi::qualified_name(toast_index)?;
-            rows.push((
-                index_name.clone(),
-                "toast index".to_owned(),
-                true,
-                "physical".to_owned(),
-                ffi::fork_size(toast_index, "main")?,
-                String::new(),
-            ));
-            rows.extend(fork_rows(&index_name, toast_index)?);
-        }
+        rows.extend(toast_rows(toast_oid)?);
     }
     for index_oid in source.index_oids() {
         let index = Rel::open(index_oid, pg_sys::AccessShareLock.cast_signed());
@@ -259,9 +314,6 @@ pub unsafe fn build_manifest(
             return Err("source TOAST relation has no valid index".into());
         }
         let toast_index = Rel::open(toast_index_oid, pg_sys::ShareLock.cast_signed());
-        if !toast_index.is_btree() {
-            return Err("source TOAST index is not a supported btree".into());
-        }
         push_relation(&mut relations, source_toast, &toast, RelationKind::Toast);
         push_relation(
             &mut relations,
@@ -269,7 +321,10 @@ pub unsafe fn build_manifest(
             &toast_index,
             RelationKind::Index,
         );
-        indexes.push(IndexTransfer::Btree(ffi::index_metadata(toast_index_oid)?));
+        indexes.push(IndexTransfer::Btree(toast_index_verdict(
+            toast_index_oid,
+            ffi::index_metadata,
+        )?));
     }
 
     for index_oid in source.index_oids() {
