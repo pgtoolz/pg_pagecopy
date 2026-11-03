@@ -175,15 +175,16 @@ Example output:
  pg_toast.pg_toast_16401   | toast       | t         | physical   |  8192 |
  pg_toast.pg_toast_16401_index | toast index | t     | physical   |  8192 |
  public.events             | table       | t         | physical   | 24576 |
- public.events             | vm          | t         | none       |  8192 | not copied; target starts empty
- public.events             | fsm         | t         | none       | 24576 | not copied; target starts empty
+ public.events             | vm          | t         | physical   |  8192 | copied byte-identically with the relation
+ public.events             | fsm         | t         | physical   | 24576 | copied byte-identically with the relation
 ```
 
 ## Limits
 
-- Both sides: same architecture, `BLCKSZ`, alignment, endianness, encoding,
-  TOAST geometry, checksum mode. Same extension version, verified at connect
-  along with the major pair and everything above.
+- `pagecopy.server_info()` on both sides must be compatible: it covers the
+  extension version, major pair, architecture, `BLCKSZ`, alignment,
+  endianness, encoding, TOAST geometry, checksums and LZ4. This is checked at
+  connect; compatible results pass these physical limits automatically.
 - Heap tables only: no partitions, foreign or unlogged tables, downgrades,
   differing checksum modes.
 - Only valid, ready plain btree indexes (`pg_catalog` opclasses, partial and

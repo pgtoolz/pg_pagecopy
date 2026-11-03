@@ -6,9 +6,9 @@ use pgrx::iter::SetOfIterator;
 use pgrx::pg_sys;
 use pgrx::spi::Spi;
 
-/// Push the main, FSM and VM entries of one relation: the export protocol
-/// guarantees the source is fully frozen before pages stream, so its visibility
-/// map is exact for the byte-identical destination heap.
+/// Push the main, FSM and VM entries of one relation. Remote transfers are
+/// frozen first; local clones preserve the source xids, so the copied
+/// visibility-map bits remain exact in both modes.
 unsafe fn push_relation(
     relations: &mut Vec<Relation>,
     oid: pg_sys::Oid,
@@ -90,9 +90,9 @@ unsafe fn classify_index_with<T>(
 /// One `pagecopy.check` result row: name, type, supported, method, size, detail.
 type CheckRow = (String, String, bool, String, i64, String);
 
-/// Fork rows exist only while the source file exists; the transfer never
-/// copies them, and the target starts with empty forks.
-const FORK_DETAIL: &str = "not copied; target starts empty";
+/// Fork rows exist only while the source file exists; both forks are copied
+/// byte-identically together with their owning relation.
+const FORK_DETAIL: &str = "copied byte-identically with the relation";
 
 fn fork_rows(name: &str, oid: pg_sys::Oid) -> Result<Vec<CheckRow>, String> {
     let mut rows = Vec::new();
@@ -105,7 +105,7 @@ fn fork_rows(name: &str, oid: pg_sys::Oid) -> Result<Vec<CheckRow>, String> {
                 name.to_owned(),
                 fork.to_owned(),
                 true,
-                "none".to_owned(),
+                "physical".to_owned(),
                 size,
                 FORK_DETAIL.to_owned(),
             ));
@@ -143,6 +143,7 @@ pub unsafe fn check_index(source_table: &str) -> Result<Vec<CheckRow>, String> {
     let heap = source
         .attributes()
         .and_then(|attributes| wire::validate_attributes(&attributes));
+    let heap_valid = heap.is_ok();
     let heap_size = ffi::fork_size(source_oid, "main")?;
     let mut rows = vec![match heap {
         Ok(()) => (
@@ -162,7 +163,9 @@ pub unsafe fn check_index(source_table: &str) -> Result<Vec<CheckRow>, String> {
             reason,
         ),
     }];
-    rows.extend(fork_rows(source_table, source_oid)?);
+    if heap_valid {
+        rows.extend(fork_rows(source_table, source_oid)?);
+    }
     let toast_oid = source.toast_oid();
     if toast_oid != pg_sys::Oid::INVALID {
         let toast_name = ffi::qualified_name(toast_oid)?;

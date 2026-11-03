@@ -28,7 +28,7 @@ Feature: Extension privileges and production build safety
       GRANT USAGE ON SCHEMA pagecopy_internal TO loader;
       GRANT EXECUTE ON FUNCTION pagecopy_internal.pagecopy_lock_source(text) TO loader;
       GRANT EXECUTE ON FUNCTION pagecopy_internal.pagecopy_export_schema(text) TO loader;
-      GRANT EXECUTE ON FUNCTION pagecopy_internal.pagecopy_export_stream(text, text, oid, boolean, boolean) TO loader;
+      GRANT EXECUTE ON FUNCTION pagecopy_internal.pagecopy_export_stream(text, text, oid, boolean, boolean, boolean) TO loader;
       """
     Then the following SQL on "source" fails with "physical source export requires superuser":
       """
@@ -43,7 +43,7 @@ Feature: Extension privileges and production build safety
     And the following SQL on "source" fails with "physical source export requires superuser":
       """
       SET ROLE loader;
-      SELECT pagecopy_internal.pagecopy_export_stream('public.events', 'public.events', 0, false, false);
+      SELECT pagecopy_internal.pagecopy_export_stream('public.events', 'public.events', 0, false, false, false);
       """
 
   Scenario: An import operator cannot replace another owner's target
@@ -92,7 +92,7 @@ Feature: Extension privileges and production build safety
       CREATE TABLE events (id integer);
       CREATE ROLE loader LOGIN;
       GRANT USAGE ON SCHEMA pagecopy_internal TO loader;
-      GRANT EXECUTE ON FUNCTION pagecopy_internal.pagecopy_export_stream(text, text, oid, boolean, boolean) TO loader;
+      GRANT EXECUTE ON FUNCTION pagecopy_internal.pagecopy_export_stream(text, text, oid, boolean, boolean, boolean) TO loader;
       SELECT pagecopy_internal.pagecopy_lock_source('public.events');
       """
     And the following SQL is executed on "target":

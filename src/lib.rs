@@ -257,8 +257,7 @@ pub mod pg_pagecopy {
     /// object), with its source size in bytes and how it will transfer.
     /// Uses `AccessShareLock` without reading relation pages or blocking
     /// writers; `pagecopy.pull` revalidates the target and current source
-    /// state. Forks are never copied: the target starts with empty forks, so
-    /// all-visible bits return only after a target VACUUM. Indexes that
+    /// state. Main, FSM and VM pages are copied byte-identically. Indexes that
     /// cannot move as page images transfer as definitions and stay INVALID on
     /// the target until REINDEX, so their constraints are not enforced until
     /// then. A relation that cannot transfer at all (view, unlogged,

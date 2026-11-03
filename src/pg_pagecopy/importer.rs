@@ -782,6 +782,7 @@ pub unsafe fn import_local(
     target_table: &str,
     generate_wal: bool,
 ) -> Result<(), String> {
+    ffi::require_source_access()?;
     let source_oid = ffi::resolve_relation(source_table)?;
     if ffi::resolve_relation(target_table) == Ok(source_oid) {
         return Err("target table must differ from the source table".into());

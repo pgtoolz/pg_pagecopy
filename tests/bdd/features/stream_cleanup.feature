@@ -24,7 +24,7 @@ Feature: Streaming resources survive early exit and errors without crashing sour
       DO $$
       BEGIN
         IF (SELECT count(*) FROM (
-          SELECT pagecopy_internal.pagecopy_export_stream('public.events', 'public.copy', 0::oid, true, false) LIMIT 1
+          SELECT pagecopy_internal.pagecopy_export_stream('public.events', 'public.copy', 0::oid, true, false, false) LIMIT 1
         ) AS header) <> 1 THEN
           RAISE EXCEPTION 'stream header missing';
         END IF;
@@ -51,7 +51,7 @@ Feature: Streaming resources survive early exit and errors without crashing sour
       BEGIN;
       SELECT pagecopy_internal.pagecopy_lock_source('public.events');
       SELECT dblink_exec('host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres', 'CHECKPOINT');
-      SELECT fail_after_header(pagecopy_internal.pagecopy_export_stream('public.events', 'public.copy', 0::oid, true, false));
+      SELECT fail_after_header(pagecopy_internal.pagecopy_export_stream('public.events', 'public.copy', 0::oid, true, false, false));
       """
     And the following SQL on "source" returns "10000":
       """
@@ -74,7 +74,7 @@ Feature: Streaming resources survive early exit and errors without crashing sour
       SELECT pagecopy_internal.pagecopy_lock_source('public.events');
       SELECT dblink_exec('host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres', 'CHECKPOINT');
       SET LOCAL statement_timeout = '100ms';
-      SELECT pause_after_header(pagecopy_internal.pagecopy_export_stream('public.events', 'public.copy', 0::oid, true, false));
+      SELECT pause_after_header(pagecopy_internal.pagecopy_export_stream('public.events', 'public.copy', 0::oid, true, false, false));
       """
     And the following SQL on "source" returns "10000":
       """

@@ -255,7 +255,7 @@ Feature: Cross-major transfer rejects unsafe physical layouts
       BEGIN;
       SELECT pagecopy_internal.pagecopy_lock_source('public.events');
       SELECT dblink_exec('host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres', 'CHECKPOINT');
-      SELECT pagecopy_internal.pagecopy_export_stream('public.events', 'public.events', 0::oid, true, true);
+      SELECT pagecopy_internal.pagecopy_export_stream('public.events', 'public.events', 0::oid, true, true, false);
       COMMIT;
       """
     And the following SQL on "source" returns "1":

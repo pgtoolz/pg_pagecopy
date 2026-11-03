@@ -369,10 +369,20 @@ Feature: Constraint-backed and invalid source indexes transfer as invalid defini
       CREATE TYPE public.mood AS ENUM ('ok');
       CREATE TABLE public.events (id integer, current_mood public.mood);
       CREATE INDEX events_id ON public.events USING btree (id);
+      INSERT INTO public.events VALUES (1, 'ok');
+      """
+    And the following SQL is executed on "source":
+      """
+      VACUUM public.events;
       """
     Then the following SQL on "source" returns "f|error|column current_mood has unsafe type public.mood; only built-in types without catalog OIDs in their values are supported":
       """
       SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE name = 'public.events';
+      """
+    And the following SQL on "source" returns "0":
+      """
+      SELECT count(*) FROM pagecopy.check('public.events')
+      WHERE name = 'public.events' AND type IN ('vm', 'fsm');
       """
     And the following SQL on "source" returns "t|physical":
       """
@@ -433,15 +443,15 @@ Feature: Constraint-backed and invalid source indexes transfer as invalid defini
       """
       SELECT type, supported, method, size
       FROM pagecopy.check('public.events')
-      WHERE name = 'public.events' AND method = 'physical';
+      WHERE name = 'public.events' AND type = 'table' AND method = 'physical';
       """
-    And the following SQL on "source" returns "vm|t|none|8192|not copied; target starts empty":
+    And the following SQL on "source" returns "vm|t|physical|8192|copied byte-identically with the relation":
       """
       SELECT type, supported, method, size, detail
       FROM pagecopy.check('public.events')
       WHERE name = 'public.events' AND type = 'vm';
       """
-    And the following SQL on "source" returns "fsm|t|none|24576|not copied; target starts empty":
+    And the following SQL on "source" returns "fsm|t|physical|24576|copied byte-identically with the relation":
       """
       SELECT type, supported, method, size, detail
       FROM pagecopy.check('public.events')

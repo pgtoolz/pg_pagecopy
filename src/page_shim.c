@@ -661,6 +661,18 @@ pc_source_connect(const char *conninfo)
 void
 pc_source_disconnect(PGconn *conn)
 {
+    if (PQtransactionStatus(conn) == PQTRANS_ACTIVE)
+    {
+        PGcancel   *cancel = PQgetCancel(conn);
+        char        error[256];
+
+        if (cancel != NULL)
+        {
+            /* A closed socket alone does not interrupt a running source query. */
+            (void) PQcancel(cancel, error, sizeof(error));
+            PQfreeCancel(cancel);
+        }
+    }
     libpqsrv_disconnect(conn);
 }
 
