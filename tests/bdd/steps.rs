@@ -274,6 +274,39 @@ async fn source_writer_is_blocked(world: &mut AttachWorld, step: &Step) {
         .unwrap_or_else(|error| panic!("blocked source writer failed: {error}"));
 }
 
+#[when("a source writer holds row locks during the following SQL on \"source\":")]
+async fn source_writer_during_check(world: &mut AttachWorld, step: &Step) {
+    let sql = world.expand_sql(docstring(step));
+    let pair = world.pair.as_ref().expect("PostgreSQL pair is not running");
+    let dsn = format!(
+        "host=127.0.0.1 port={} dbname=postgres user=postgres",
+        pair.source_port()
+    );
+    let (writer, connection) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls)
+        .await
+        .expect("source writer connection failed");
+    let connection_task = tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            eprintln!("source writer connection error: {error}");
+        }
+    });
+    writer
+        .batch_execute("BEGIN; INSERT INTO public.events VALUES (99, 'writer')")
+        .await
+        .expect("source writer did not acquire its row locks");
+
+    let check = tokio::time::timeout(Duration::from_secs(10), pair.execute("source", &sql)).await;
+    let commit = writer.batch_execute("COMMIT").await;
+    drop(writer);
+    connection_task
+        .await
+        .expect("source writer connection task failed");
+    check
+        .expect("pagecopy.check waited for an ordinary source writer")
+        .unwrap_or_else(|error| panic!("pagecopy.check failed: {error}"));
+    commit.expect("source writer did not commit");
+}
+
 #[when("target ownership changes during the following SQL on \"target\":")]
 async fn target_ownership_change(world: &mut AttachWorld, step: &Step) {
     let sql = world.expand_sql(docstring(step));

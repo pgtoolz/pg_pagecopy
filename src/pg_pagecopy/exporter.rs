@@ -47,6 +47,90 @@ unsafe fn push_relation(
     }
 }
 
+/// How one source index crosses to the target. The metadata callback selects
+/// catalog-only preflight or the full physical checks, sharing all other rules.
+enum ClassifyIndex<T> {
+    Physical(T),
+    /// Transfer the definition only; the target index stays INVALID until REINDEX.
+    Invalid {
+        definition: String,
+        unique: bool,
+        reason: String,
+    },
+}
+
+/// Classify one opened source index. Everything that cannot move as page
+/// images degrades to its definition. Custom opclasses remain a hard error.
+///
+/// # Safety
+/// Reads the source catalog; runs inside PostgreSQL. The callback decides
+/// whether physical metadata is read.
+unsafe fn classify_index_with<T>(
+    index: &Rel,
+    metadata: impl FnOnce(pg_sys::Oid) -> Result<T, String>,
+) -> Result<ClassifyIndex<T>, String> {
+    let index_oid = index.oid();
+    let degradable = |reason: String| -> Result<ClassifyIndex<T>, String> {
+        ffi::ensure_no_custom_opclass(index_oid)?;
+        Ok(ClassifyIndex::Invalid {
+            definition: ffi::index_definition(index_oid)?,
+            unique: index.is_unique(),
+            reason,
+        })
+    };
+    if let Some(reason) = index.non_physical_reason() {
+        return degradable(reason);
+    }
+    match metadata(index_oid) {
+        Ok(metadata) => Ok(ClassifyIndex::Physical(metadata)),
+        Err(reason) => degradable(reason),
+    }
+}
+
+/// One row per source relation and index for `pagecopy.check`: the heap itself,
+/// then how every index would transfer. Read-only; performs no transfer.
+///
+/// # Safety
+/// Opens source relations under `AccessShareLock` until the statement ends;
+/// blocks concurrent DDL only, never writers.
+pub unsafe fn check_index(
+    source_table: &str,
+) -> Result<Vec<(String, bool, String, String)>, String> {
+    ffi::require_source_access()?;
+    let source_oid = ffi::resolve_relation(source_table)?;
+    let source = Rel::open(source_oid, pg_sys::AccessShareLock.cast_signed());
+    if !source.is_plain_logged_table() {
+        return Err("source must be a plain logged table".into());
+    }
+    let heap = source
+        .attributes()
+        .and_then(|attributes| wire::validate_attributes(&attributes));
+    let mut rows = vec![match heap {
+        Ok(()) => (
+            source_table.to_owned(),
+            true,
+            "physical".to_owned(),
+            String::new(),
+        ),
+        Err(reason) => (source_table.to_owned(), false, "error".to_owned(), reason),
+    }];
+    for index_oid in source.index_oids() {
+        let index = Rel::open(index_oid, pg_sys::AccessShareLock.cast_signed());
+        let row =
+            match classify_index_with(&index, |oid| ffi::index_catalog_metadata(oid).map(|_| ())) {
+                Ok(ClassifyIndex::Physical(())) => {
+                    (index.name(), true, "physical".to_owned(), String::new())
+                }
+                Ok(ClassifyIndex::Invalid { reason, .. }) => {
+                    (index.name(), true, "definition".to_owned(), reason)
+                }
+                Err(reason) => (index.name(), false, "error".to_owned(), reason),
+            };
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
 pub unsafe fn build_manifest(
     source_table: &str,
     target_table: &str,
@@ -95,26 +179,16 @@ pub unsafe fn build_manifest(
 
     for index_oid in source.index_oids() {
         let index = Rel::open(index_oid, pg_sys::ShareLock.cast_signed());
-        let metadata = if index.is_btree() {
-            ffi::index_metadata(index_oid).ok()
-        } else {
-            None
-        };
-        if let Some(metadata) = metadata {
-            push_relation(&mut relations, index_oid, &index, RelationKind::Index);
-            indexes.push(IndexTransfer::Btree(metadata));
-        } else {
-            if !index.can_degrade() {
-                return Err(format!(
-                    "index {} cannot be degraded: automatic target creation does not support foreign/exclusion constraints",
-                    index.name()
-                ));
+        match classify_index_with(&index, ffi::index_metadata)? {
+            ClassifyIndex::Physical(metadata) => {
+                push_relation(&mut relations, index_oid, &index, RelationKind::Index);
+                indexes.push(IndexTransfer::Btree(metadata));
             }
-            ffi::ensure_no_custom_opclass(index_oid)?;
-            indexes.push(IndexTransfer::Invalid {
-                definition: ffi::index_definition(index_oid)?,
-                unique: index.is_unique(),
-            });
+            ClassifyIndex::Invalid {
+                definition, unique, ..
+            } => {
+                indexes.push(IndexTransfer::Invalid { definition, unique });
+            }
         }
     }
 
@@ -248,15 +322,14 @@ unsafe fn export_schema_inner(source_table: &str) -> Result<Vec<u8>, String> {
         let unsupported = client
             .select(
                 "SELECT contype::text FROM pg_constraint \
-                 WHERE conrelid = $1 AND contype IN ('f', 'x') LIMIT 1",
+                 WHERE conrelid = $1 AND contype = 'f' LIMIT 1",
                 None,
                 &[source_oid.into()],
             )
             .map_err(|error| error.to_string())?;
         if !unsupported.is_empty() {
             return Err(
-                "automatic target creation does not support foreign/exclusion constraints"
-                    .to_owned(),
+                "automatic target creation does not support foreign key constraints".to_owned(),
             );
         }
         let rows = client

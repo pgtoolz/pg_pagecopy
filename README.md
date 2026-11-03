@@ -38,6 +38,47 @@ There is also `pagecopy.pull_server(server_name, ...)` taking a foreign
 server + user mapping instead of a connection string, so credentials do not
 appear in SQL, logs and `pg_stat_activity`.
 
+Before pulling, run `pagecopy.check()` locally on the source database to
+list how every index of a relation will be transferred — see
+[Preflight](#preflight-pagecopycheck).
+
+## Preflight: `pagecopy.check`
+
+`pagecopy.check(source_relation)` reads the current database and reports the
+source-side transfer plan per index. It takes no DSN, opens no remote connection,
+and changes nothing. It reads catalogs under `AccessShareLock`, does not read
+relation pages, and does not wait for ordinary INSERT/UPDATE/DELETE writers.
+`pull` still revalidates the target and the current source state before
+transfer: a check passing is not a guarantee that a later pull will succeed.
+
+- `physical` — pages copied as-is, usable right after the transfer;
+- `definition` — recreated from its definition, then marked invalid
+  (`indisvalid=false`, `indisready=false`) and rebuilt with `REINDEX`;
+  `detail` explains why (`index access method hash`, `invalid on source`,
+  or a backing constraint);
+- `error` — the source-side transfer plan is unsupported (unsafe column type,
+  custom opclass, or another catalog restriction).
+
+The first row always describes the relation itself and can report `error`
+for an unsupported heap type. Rows are unordered, so sort by `index_name` for
+a stable listing:
+
+```sql
+-- Execute on the source database.
+SELECT * FROM pagecopy.check('public.events')
+ORDER BY index_name;
+```
+
+```text
+ index_name    | supported | method     | detail
+---------------+-----------+------------+-----------------------------------------------------------
+ events_custom | f         | error      | custom opclasses are not supported; only pg_catalog btree opclasses are allowed
+ events_hash   | t         | definition | index access method hash
+ events_key    | t         | definition | invalid on source
+ events_valid  | t         | physical   |
+ public.events | t         | physical   |
+```
+
 ## What happens during a transfer
 
 The big picture — the remote `pull` path (`clone` reuses the same machinery
@@ -101,16 +142,13 @@ Step by step:
    no table data is decoded. Page checksums are verified on the source.
 4. The target installs pages in one transaction, rewriting TOAST pointers,
    checksums and LSNs.
-5. Indexes: plain btree (`pg_catalog` opclasses, not partial or expression)
-   is copied as pages. An unsupported secondary index (hash, GiST, GIN,
-   BRIN, SP-GiST, partial/expression btree) does **not** stop the transfer —
-   it is created on the target from its definition marked invalid
-   (`indisvalid=false, indisready=false`) and needs `REINDEX` after the
-   transfer. The only index-related stop factors: an index backing a
-   constraint (primary, unique, exclusion) or replica identity — those
-   cannot be left invalid, so the transfer is rejected up front. Custom
-   opclasses are always rejected (a same-named opclass on the target could
-   silently change sort semantics).
+5. Indexes: a valid, ready plain btree with `pg_catalog` opclasses
+   (partial and expression included) is copied as pages, including a btree
+   backing a primary key or unique constraint. Every other source index —
+   hash, GiST, GIN, BRIN, SP-GiST, invalid on source, and every exclusion
+   index — arrives as a definition marked invalid: run `REINDEX` after the
+   transfer, and until then uniqueness/exclusion are **not enforced**
+   (recovery notes in Limits). Custom opclasses are rejected outright.
 
 Source writers are blocked for the read window. This is a full overwrite,
 not a merge. Progress: every 1024 pages a `NOTICE` fires and
@@ -124,16 +162,16 @@ not a merge. Progress: every 1024 pages a `NOTICE` fires and
   along with the major pair and everything above.
 - Heap tables only: no partitions, foreign or unlogged tables, downgrades,
   differing checksum modes.
-- Plain btree indexes (`pg_catalog` opclasses, not partial or expression)
-  are copied as pages. An unsupported secondary index (hash, GiST, GIN,
-  BRIN, SP-GiST, partial/expression btree) does **not** fail the transfer:
-  it is created on the target from its definition marked invalid
-  (`indisvalid=false, indisready=false`), the data transfer succeeds, and
-  you run `REINDEX` afterwards to make it usable. A transfer fails up front
-  only when an index backs a constraint (primary, unique, exclusion) or
-  replica identity — those cannot be degraded. Custom opclasses are always
-  rejected: a same-named opclass on the target could silently change sort
-  semantics.
+- Only valid, ready plain btree indexes (`pg_catalog` opclasses, partial and
+  expression variants) are copied as pages; every other index arrives as an
+  invalid definition to `REINDEX` yourself — until then uniqueness/exclusion
+  are not enforced. Cross-major deparse drift fails closed; custom opclasses
+  are rejected. After transfer, `REINDEX` alone restores enforcement on an
+  auto-created target; on a pre-created target re-add PK/UNIQUE with
+  `ALTER TABLE ... ADD CONSTRAINT ... USING INDEX` and exclusion with
+  `ADD CONSTRAINT ... EXCLUDE ...` (no `USING INDEX` for exclusion). A
+  degraded replica-identity index stays designated but invalid until
+  `REINDEX`. `pagecopy.check()` lists every index's mode before pulling.
 - Whitelisted built-in types and arrays of them. Enums, `reg*`, OID,
   composite, range, domain and extension types are rejected. Collation
   identity must match. Fast defaults and virtual generated columns are
@@ -141,7 +179,8 @@ not a merge. Progress: every 1024 pages a `NOTICE` fires and
   defaults. A pre-created target with a `nextval` default requires the
   sequence to be owned by the column, and its state is then advanced under
   the source lock.
-- Foreign and exclusion constraints are unsupported. ACLs, ownership and
+- Foreign key constraints are unsupported; source-side exclusion constraints
+  arrive as invalid definitions (see above). ACLs, ownership and
   roles are not transferred.
 - The source connection must be a superuser, because physical export
   bypasses RLS. The target caller must own an existing target. Internal

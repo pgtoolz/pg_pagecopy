@@ -31,7 +31,7 @@ Feature: Unsupported secondary indexes survive as rebuildable definitions
         'public.events', 'public.events', true
       );
       """
-    Then the following SQL on "target" returns "3|2":
+    Then the following SQL on "target" returns "1|4":
       """
       SELECT count(*) FILTER (WHERE NOT indisvalid AND NOT indisready),
              count(*) FILTER (WHERE indisvalid AND indisready)
@@ -68,7 +68,7 @@ Feature: Unsupported secondary indexes survive as rebuildable definitions
         'public.events', 'public.events', true
       );
       """
-    Then the following SQL on "target" returns "3|3|6":
+    Then the following SQL on "target" returns "1|3|6":
       """
       SELECT (SELECT count(*) FROM pg_index
               WHERE indrelid = 'public.events'::regclass
@@ -196,7 +196,7 @@ Feature: Unsupported secondary indexes survive as rebuildable definitions
       INSERT INTO public.events VALUES (99, 'target');
       <setup>
       """
-    Then the following SQL on "target" fails with "target table participates in foreign/exclusion constraints":
+    Then the following SQL on "target" fails with "target table participates in foreign key constraints":
       """
       SELECT pagecopy.pull(
         'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
@@ -277,42 +277,6 @@ Feature: Unsupported secondary indexes survive as rebuildable definitions
       SELECT (SELECT count(*) FROM public.events), to_regclass('app.events');
       """
 
-  Scenario: Degrading a clustered expression index clears indisclustered
-    Given a fresh PostgreSQL pair
-    And the following SQL is executed on "source":
-      """
-      CREATE EXTENSION pg_pagecopy;
-      CREATE TABLE public.events (id integer, note text);
-      CREATE INDEX events_expression ON public.events USING btree (lower(note));
-      INSERT INTO public.events VALUES (1, 'Alpha'), (2, 'beta');
-      """
-    And the following SQL is executed on "target":
-      """
-      CREATE EXTENSION pg_pagecopy;
-      CREATE TABLE public.events (id integer, note text);
-      CREATE INDEX events_expression ON public.events USING btree (lower(note));
-      INSERT INTO public.events VALUES (99, 'target');
-      CLUSTER public.events USING events_expression;
-      SET search_path = public, pg_catalog;
-      """
-    Then the following SQL on "target" returns "public, pg_catalog":
-      """
-      SET search_path = public, pg_catalog;
-      SELECT current_setting('search_path') FROM (
-        SELECT pagecopy.pull(
-          'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
-          'public.events', 'events', false
-        )
-      ) AS moved;
-      """
-    And the following SQL on "target" returns "f|f|f|2":
-      """
-      SELECT indisvalid, indisready, indisclustered,
-             (SELECT count(*) FROM public.events)
-      FROM pg_index WHERE indexrelid = 'events_expression'::regclass;
-      """
-
-
   Scenario: An unqualified target rejects a visible existing view
     Given a fresh PostgreSQL pair
     And the following SQL is executed on "source":
@@ -373,7 +337,7 @@ Feature: Unsupported secondary indexes survive as rebuildable definitions
       SELECT pg_get_expr(i.indexprs, i.indrelid)
       FROM pg_index i WHERE i.indexrelid = 'events_expression'::regclass;
       """
-    And the following SQL on "target" returns "f|f":
+    And the following SQL on "target" returns "t|t":
       """
       SELECT indisvalid, indisready FROM pg_index
       WHERE indexrelid = 'events_expression'::regclass;

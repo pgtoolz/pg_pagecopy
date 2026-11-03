@@ -277,11 +277,11 @@ fn prepare_state(
             IndexTransfer::Invalid { definition, unique } => target_indexes
                 .iter()
                 .position(|(candidate, index)| {
-                    candidate == definition && !unique && index.can_degrade() && !index.is_btree()
+                    candidate == definition && index.is_unique() == *unique && !index.is_btree()
                 })
                 .or_else(|| {
                     target_indexes.iter().position(|(candidate, index)| {
-                        candidate == definition && !unique && index.can_degrade()
+                        candidate == definition && index.is_unique() == *unique
                     })
                 }),
         }
@@ -293,12 +293,9 @@ fn prepare_state(
                 targets.push(index);
             }
             IndexTransfer::Invalid { .. } => {
-                if !index.can_degrade() {
-                    return Err(format!("target index {} cannot be degraded", index.name()));
-                }
                 index.set_validity(false);
                 pgrx::warning!(
-                    "pg_pagecopy: index {} was transferred as INVALID; run REINDEX INDEX before using it",
+                    "pg_pagecopy: index {} was transferred as INVALID and is not maintained; any uniqueness/exclusion enforcement it provides is disabled, and replica identity using it may be unusable; prevent duplicate/conflicting writes and run REINDEX INDEX before use",
                     index.name()
                 );
             }
@@ -483,13 +480,13 @@ unsafe fn open_target(schema: &TableSchema, target_table: &str) -> Result<Target
     }
     let unsupported_constraints = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint \
-         WHERE contype IN ('f', 'x') AND (conrelid = $1 OR confrelid = $1))",
+         WHERE contype = 'f' AND (conrelid = $1 OR confrelid = $1))",
         &[target_oid.into()],
     )
     .map_err(|error| error.to_string())?
     .unwrap_or(false);
     if unsupported_constraints {
-        return Err("target table participates in foreign/exclusion constraints".into());
+        return Err("target table participates in foreign key constraints".into());
     }
     let toast_oid = main.toast_oid();
     let toast = if toast_oid == pg_sys::Oid::INVALID {
@@ -513,15 +510,11 @@ unsafe fn open_target(schema: &TableSchema, target_table: &str) -> Result<Target
     } else {
         None
     };
+    // Any target index may stay INVALID for a later REINDEX; only the TOAST
+    // index checked above must transfer physically.
     let mut indexes = Vec::new();
     for oid in main.index_oids() {
         let index = Rel::open(oid, pg_sys::AccessExclusiveLock.cast_signed());
-        if !index.is_btree() && !index.can_degrade() {
-            return Err(format!(
-                "target index {} is neither physically supported nor degradable",
-                index.name()
-            ));
-        }
         indexes.push((ffi::index_definition(oid)?, index));
     }
     Ok(TargetRelations {

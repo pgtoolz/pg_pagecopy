@@ -243,8 +243,9 @@ impl Rel {
                 && !relation.rd_index.is_null()
                 && (*relation.rd_index).indisvalid
                 && (*relation.rd_index).indisready
-                && relation.rd_indpred.is_null()
-                && relation.rd_indexprs.is_null()
+                // Partial predicates and key expressions live in the catalog
+                // (pg_index.indpred/indexprs) and in pg_get_indexdef output;
+                // page images themselves are plain btree either way.
                 && !(*relation.rd_index).indisexclusion
         }
     }
@@ -255,15 +256,30 @@ impl Rel {
         }
     }
 
-    /// Only optional secondary indexes may be left invalid for a later REINDEX.
-    pub fn can_degrade(&self) -> bool {
+    /// Why an index cannot transfer as page images; `None` when it can.
+    /// Complements `is_btree`: every condition checked here fails that gate.
+    pub fn non_physical_reason(&self) -> Option<String> {
         unsafe {
-            let relation = &*self.0;
-            !relation.rd_index.is_null()
-                && !(*relation.rd_index).indisprimary
-                && !(*relation.rd_index).indisunique
-                && !(*relation.rd_index).indisexclusion
-                && !(*relation.rd_index).indisreplident
+            if !self.is_btree_am() {
+                return Some(format!(
+                    "index access method {}",
+                    access_method_name((*(*self.0).rd_rel).relam)
+                ));
+            }
+            if (*self.0).rd_index.is_null() {
+                return Some("not an index".into());
+            }
+            let index = &*(*self.0).rd_index;
+            if index.indisexclusion {
+                return Some("exclusion constraint".into());
+            }
+            if !index.indisvalid {
+                return Some("invalid on source".into());
+            }
+            if !index.indisready {
+                return Some("not ready on source".into());
+            }
+            None
         }
     }
 
@@ -504,6 +520,18 @@ impl Drop for Rel {
     }
 }
 
+/// Name of an access method OID for classification messages; the raw OID is
+/// the fallback when the catalog row cannot be read.
+fn access_method_name(relam: pg_sys::Oid) -> String {
+    Spi::get_one_with_args::<String>(
+        "SELECT a.amname::text FROM pg_catalog.pg_am a WHERE a.oid = $1",
+        &[relam.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| relam.to_u32().to_string())
+}
+
 pub fn data_checksums_enabled() -> bool {
     unsafe { pg_sys::DataChecksumsEnabled() }
 }
@@ -573,16 +601,7 @@ pub fn ensure_no_custom_opclass(oid: pg_sys::Oid) -> Result<(), String> {
 }
 
 #[allow(clippy::too_many_lines)] // Keep index catalog identity and default-collation checks together.
-pub fn index_metadata(oid: pg_sys::Oid) -> Result<wire::BtreeMetadata, String> {
-    let unsupported = Spi::get_one_with_args::<bool>(
-        "SELECT (SELECT indexprs IS NOT NULL OR indpred IS NOT NULL FROM pg_index WHERE indexrelid = $1)",
-        &[oid.into()],
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "index catalog metadata is missing".to_owned())?;
-    if unsupported {
-        return Err("expression and partial indexes are not supported".into());
-    }
+pub fn index_catalog_metadata(oid: pg_sys::Oid) -> Result<(String, String), String> {
     ensure_no_custom_opclass(oid)?;
     let default_identity_missing = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS ( \
@@ -657,11 +676,16 @@ pub fn index_metadata(oid: pg_sys::Oid) -> Result<wire::BtreeMetadata, String> {
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "index catalog metadata is missing".to_owned())?;
+    Ok((index_definition(oid)?, shape))
+}
+
+pub fn index_metadata(oid: pg_sys::Oid) -> Result<wire::BtreeMetadata, String> {
+    let (definition, shape) = index_catalog_metadata(oid)?;
     let rel = unsafe { Rel::open(oid, pg_sys::ShareLock.cast_signed()) };
     let mut raw = RawBtreeMetadata::default();
     unsafe { guard(|| pc_btree_metadata(rel.0, &raw mut raw)) };
     Ok(wire::BtreeMetadata {
-        definition: index_definition(oid)?,
+        definition,
         shape,
         btree_version: raw.version,
         all_equal_image: raw.all_equal_image,

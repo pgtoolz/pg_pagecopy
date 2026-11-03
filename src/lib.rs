@@ -239,6 +239,33 @@ pub mod pg_pagecopy {
         }
     }
 
+    /// Read-only catalog plan for a relation in the current (source) database.
+    /// Uses `AccessShareLock` without reading relation pages or blocking writers;
+    /// `pagecopy.pull` revalidates the target and current source state.
+    /// The first row is the relation itself; indexes that cannot move as page
+    /// images transfer as definitions and stay INVALID on the target until
+    /// REINDEX, so their constraints are not enforced until then.
+    ///
+    /// # Panics
+    /// Panics if the relation cannot be resolved or its catalog cannot be read.
+    #[must_use]
+    #[pg_extern]
+    pub fn check(
+        source_relation: &str,
+    ) -> TableIterator<
+        'static,
+        (
+            name!(index_name, String),
+            name!(supported, bool),
+            name!(method, String),
+            name!(detail, String),
+        ),
+    > {
+        let rows = unsafe { exporter::check_index(source_relation) }
+            .unwrap_or_else(|error| panic!("pg_pagecopy: {error}"));
+        TableIterator::new(rows)
+    }
+
     // Installation does not grant raw-page access to every database user.
     // Administrators may grant execute to trusted roles; table ACLs still apply.
     pgrx::extension_sql!(
@@ -253,6 +280,7 @@ REVOKE ALL ON FUNCTION pagecopy_internal.pagecopy_export_schema(text) FROM PUBLI
 REVOKE ALL ON FUNCTION pagecopy.pull(text, text, text, boolean) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pagecopy.pull_server(text, text, text, boolean) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pagecopy.clone(text, text, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pagecopy.check(text) FROM PUBLIC;
 ",
         name = "pagecopy_revoke_public_execute",
         requires = [
@@ -263,7 +291,8 @@ REVOKE ALL ON FUNCTION pagecopy.clone(text, text, boolean) FROM PUBLIC;
             pagecopy_export_schema,
             pull,
             pull_server,
-            clone
+            clone,
+            check
         ]
     );
 }
