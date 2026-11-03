@@ -723,7 +723,7 @@ pub unsafe fn import(
 }
 
 /// A local (same-cluster) transfer keeps original xids, so the new relation
-/// must inherit the source freeze horizons: pg_class.relfrozenxid newer than
+/// must inherit the source freeze horizons: `pg_class.relfrozenxid` newer than
 /// a copied xid would let vacuum skip freezing it and wraparound could then
 /// truncate its CLOG slot while the tuple is still unfrozen.
 fn apply_freeze_horizons(

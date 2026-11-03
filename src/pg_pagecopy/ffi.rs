@@ -533,6 +533,7 @@ impl Rel {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::fn_params_excessive_bools)] // Mirrors the C shim flags exactly.
     pub fn prepare_heap_page(
         &self,
         block: u32,

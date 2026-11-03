@@ -214,7 +214,7 @@ pub struct TableSchema {
     pub sequences: Vec<SequenceState>,
 }
 
-/// Freeze horizons copied from the source pg_class rows. A cross-cluster
+/// Freeze horizons copied from the source `pg_class` rows. A cross-cluster
 /// transfer freezes every tuple, so the target can keep its default
 /// horizons; a local (same-cluster) transfer keeps original xids and must
 /// inherit these, or vacuum could assume xids it must still freeze.
@@ -829,7 +829,7 @@ mod tests {
             target_table: "public.events_copy".into(),
             source_checksums: true,
             target_checksums: true,
-            source_horizons: crate::wire::FreezeHorizons {
+            source_horizons: FreezeHorizons {
                 relfrozenxid: 3,
                 relminmxid: 1,
             },
@@ -980,7 +980,7 @@ mod tests {
     fn headers_use_versioned_layout() {
         let header = encode_header(&manifest()).unwrap();
         assert_eq!(HEADER_LEN, 10);
-        assert_eq!(&header[..6], b"PGPC\0\x01");
+        assert_eq!(&header[..6], b"PGPC\0\x02");
         let manifest_length =
             usize::try_from(u32::from_be_bytes(header[6..10].try_into().unwrap())).unwrap();
         assert_eq!(manifest_length, header.len() - HEADER_LEN);

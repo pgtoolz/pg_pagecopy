@@ -239,7 +239,7 @@ pub mod pg_pagecopy {
     /// Clone a table inside the current database. Inside one cluster the
     /// original xids stay valid, so the source is not frozen: pages keep
     /// their xmin/xmax and the target inherits the source freeze horizons
-    /// (pg_class.relfrozenxid/relminmxid).
+    /// (`pg_class.relfrozenxid`/`relminmxid`).
     ///
     /// # Panics
     /// Panics if locking, target creation or page installation fails.

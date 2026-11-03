@@ -226,7 +226,7 @@ pub unsafe fn check_index(source_table: &str) -> Result<Vec<CheckRow>, String> {
     Ok(rows)
 }
 
-/// Freeze horizons of a relation straight from pg_class, captured while the
+/// Freeze horizons of a relation straight from `pg_class`, captured while the
 /// export transaction holds the source lock so a concurrent VACUUM cannot
 /// advance them past the copied pages.
 fn pg_class_horizons(oid: pg_sys::Oid) -> Result<wire::FreezeHorizons, String> {
@@ -314,10 +314,10 @@ pub unsafe fn build_manifest(
     }
 
     let source_horizons = pg_class_horizons(source_oid)?;
-    let toast_horizons = if source_toast != pg_sys::Oid::INVALID {
-        Some(pg_class_horizons(source_toast)?)
-    } else {
+    let toast_horizons = if source_toast == pg_sys::Oid::INVALID {
         None
+    } else {
+        Some(pg_class_horizons(source_toast)?)
     };
 
     Ok(Manifest {
@@ -567,6 +567,7 @@ unsafe fn export_schema_inner(source_table: &str) -> Result<Vec<u8>, String> {
     .map_err(|error| error.to_string())
 }
 
+#[allow(clippy::struct_excessive_bools)] // Independent transfer flags, not a state machine.
 struct ExportState {
     manifest: Manifest,
     source_toast_oid: pg_sys::Oid,
