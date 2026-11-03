@@ -146,6 +146,18 @@ SELECT * FROM pagecopy.check('public.events')
 ORDER BY index_name;
 ```
 
+Example output:
+
+```text
+ index_name    | supported | method     | detail
+---------------+-----------+------------+-----------------------------------------------------------
+ events_custom | f         | error      | custom opclasses are not supported; only pg_catalog btree opclasses are allowed
+ events_hash   | t         | definition | index access method hash
+ events_key    | t         | definition | invalid on source
+ events_valid  | t         | physical   |
+ public.events | t         | physical   |
+```
+
 ## Limits
 
 - Both sides: same architecture, `BLCKSZ`, alignment, endianness, encoding,
@@ -194,12 +206,3 @@ verified with `verify_heapam` and `bt_index_check(..., heapallindexed=true)`.
 ## License
 
 MIT
-```text
- index_name    | supported | method     | detail
----------------+-----------+------------+-----------------------------------------------------------
- events_custom | f         | error      | custom opclasses are not supported; only pg_catalog btree opclasses are allowed
- events_hash   | t         | definition | index access method hash
- events_key    | t         | definition | invalid on source
- events_valid  | t         | physical   |
- public.events | t         | physical   |
-```
