@@ -139,7 +139,9 @@ pub mod pg_pagecopy {
         )))
     }
 
-    /// Export one frozen table as a value-per-call COPY bytea stream.
+    /// Export one table as a value-per-call COPY bytea stream. Cross-cluster
+    /// transfers require frozen tuples; `local_transfer` keeps original xids
+    /// for a same-cluster clone instead.
     #[must_use]
     #[pg_extern(schema = "pagecopy_internal")]
     pub fn pagecopy_export_stream(
@@ -148,6 +150,7 @@ pub mod pg_pagecopy {
         target_toast_oid: pg_sys::Oid,
         target_lz4_supported: bool,
         target_checksums: bool,
+        local_transfer: bool,
     ) -> SetOfIterator<'static, Vec<u8>> {
         unsafe {
             exporter::export_stream(
@@ -156,6 +159,7 @@ pub mod pg_pagecopy {
                 target_toast_oid,
                 target_lz4_supported,
                 target_checksums,
+                local_transfer,
             )
         }
     }
@@ -226,11 +230,13 @@ pub mod pg_pagecopy {
         }
     }
 
-    /// Clone a table inside the current database, freezing it first.
-    /// Emits a NOTICE for the automatic VACUUM (FREEZE) step.
+    /// Clone a table inside the current database. Inside one cluster the
+    /// original xids stay valid, so the source is not frozen: pages keep
+    /// their xmin/xmax and the target inherits the source freeze horizons
+    /// (pg_class.relfrozenxid/relminmxid).
     ///
     /// # Panics
-    /// Panics if freezing, target creation or page installation fails.
+    /// Panics if locking, target creation or page installation fails.
     #[pg_extern]
     pub fn clone(source_table: &str, target_table: &str, generate_wal: default!(bool, "true")) {
         unsafe {
@@ -282,7 +288,7 @@ pub mod pg_pagecopy {
 GRANT USAGE ON SCHEMA pagecopy TO PUBLIC;
 REVOKE ALL ON SCHEMA pagecopy_internal FROM PUBLIC;
 REVOKE ALL ON FUNCTION pagecopy.server_info() FROM PUBLIC;
-REVOKE ALL ON FUNCTION pagecopy_internal.pagecopy_export_stream(text, text, oid, boolean, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pagecopy_internal.pagecopy_export_stream(text, text, oid, boolean, boolean, boolean) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pagecopy_internal.pagecopy_lock_source(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pagecopy_internal.pagecopy_source_is_frozen(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pagecopy_internal.pagecopy_export_schema(text) FROM PUBLIC;

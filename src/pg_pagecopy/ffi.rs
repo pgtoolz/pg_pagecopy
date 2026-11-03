@@ -117,6 +117,7 @@ unsafe extern "C" {
         patch_toast: bool,
         target_lz4_supported: bool,
         checksums: bool,
+        keep_xids: bool,
     );
     fn pc_verify_btree_metapage(page: *mut c_char, all_equal_image: bool) -> bool;
     fn pc_btree_metadata(rel: pg_sys::Relation, metadata: *mut RawBtreeMetadata);
@@ -541,6 +542,7 @@ impl Rel {
         patch_toast: bool,
         target_lz4_supported: bool,
         checksums: bool,
+        keep_xids: bool,
     ) {
         unsafe {
             guard(|| {
@@ -553,6 +555,7 @@ impl Rel {
                     patch_toast,
                     target_lz4_supported,
                     checksums,
+                    keep_xids,
                 );
             });
         }
