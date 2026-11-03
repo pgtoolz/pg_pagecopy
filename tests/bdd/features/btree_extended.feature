@@ -171,8 +171,13 @@ Feature: Partial and expression btree indexes transfer as ready pages
               WHERE indrelid = 'public.events'::regclass AND NOT indisvalid)
       FROM public.events;
       """
-    And the following SQL on "target" contains "Index Only Scan":
+    When the following SQL is executed on "target":
+      """
+      VACUUM ANALYZE public.events;
+      """
+    Then the following SQL on "target" contains "Index Only Scan":
       """
       SET enable_seqscan = off;
+      SET enable_bitmapscan = off;
       EXPLAIN (COSTS OFF) SELECT score FROM public.events WHERE score = 3;
       """
