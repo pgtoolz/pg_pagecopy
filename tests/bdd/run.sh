@@ -31,7 +31,7 @@ build_extension() {
 }
 
 if [ "$SOURCE_PG_VERSION" != "$TARGET_PG_VERSION" ]; then
-  for major in 16 17 18; do
+  for major in 13 16 17 18; do
     build_extension "$major"
   done
   docker build -f "$root/tests/bdd/Dockerfile.cross" \

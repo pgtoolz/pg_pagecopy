@@ -18,9 +18,19 @@ RUN touch main.rs postgres.rs steps.rs world.rs \
     && cargo test --release --locked \
     && cargo build --release --locked
 
+FROM pg-pagecopy-pg13:dev AS extension13
 FROM pg-pagecopy-pg16:dev AS extension16
 FROM pg-pagecopy-pg17:dev AS extension17
 FROM pg-pagecopy-pg18:dev AS extension18
+
+FROM postgres:13-bookworm AS fixtures13
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc postgresql-server-dev-13 \
+    && rm -rf /var/lib/apt/lists/*
+COPY tests/bdd/fixtures.c /tmp/fixtures.c
+RUN cc -shared -fPIC -Wall -Werror \
+    -I"$(/usr/lib/postgresql/13/bin/pg_config --includedir-server)" \
+    /tmp/fixtures.c -o /tmp/pc_bdd_fixtures.so
 
 FROM postgres:16-bookworm AS fixtures16
 RUN apt-get update \
@@ -54,15 +64,18 @@ ARG SOURCE_PG_VERSION
 ARG TARGET_PG_VERSION
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       postgresql-16 postgresql-17 postgresql-18 \
-       postgresql-contrib-16 postgresql-contrib-17 postgresql-contrib-18 \
+       postgresql-13 postgresql-16 postgresql-17 postgresql-18 \
+       postgresql-contrib-13 postgresql-contrib-16 postgresql-contrib-17 postgresql-contrib-18 \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=extension13 /usr/lib/postgresql/13/lib/pg_pagecopy.so /usr/lib/postgresql/13/lib/pg_pagecopy.so
+COPY --from=extension13 /usr/share/postgresql/13/extension/pg_pagecopy* /usr/share/postgresql/13/extension/
 COPY --from=extension16 /usr/lib/postgresql/16/lib/pg_pagecopy.so /usr/lib/postgresql/16/lib/pg_pagecopy.so
 COPY --from=extension16 /usr/share/postgresql/16/extension/pg_pagecopy* /usr/share/postgresql/16/extension/
 COPY --from=extension17 /usr/lib/postgresql/17/lib/pg_pagecopy.so /usr/lib/postgresql/17/lib/pg_pagecopy.so
 COPY --from=extension17 /usr/share/postgresql/17/extension/pg_pagecopy* /usr/share/postgresql/17/extension/
 COPY --from=extension18 /usr/lib/postgresql/18/lib/pg_pagecopy.so /usr/lib/postgresql/18/lib/pg_pagecopy.so
 COPY --from=extension18 /usr/share/postgresql/18/extension/pg_pagecopy* /usr/share/postgresql/18/extension/
+COPY --from=fixtures13 /tmp/pc_bdd_fixtures.so /usr/lib/postgresql/13/lib/
 COPY --from=fixtures16 /tmp/pc_bdd_fixtures.so /usr/lib/postgresql/16/lib/
 COPY --from=fixtures17 /tmp/pc_bdd_fixtures.so /usr/lib/postgresql/17/lib/
 COPY --from=fixtures18 /tmp/pc_bdd_fixtures.so /usr/lib/postgresql/18/lib/

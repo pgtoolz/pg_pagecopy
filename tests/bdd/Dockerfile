@@ -34,4 +34,6 @@ ENV PATH="/usr/lib/postgresql/${PG_VERSION}/bin:${PATH}" \
 COPY --from=build /work/target/release/pg-pagecopy-bdd /usr/local/bin/pg-pagecopy-bdd
 COPY tests/bdd/features /opt/pg-pagecopy-bdd/features
 COPY tests/bdd/features-release /opt/pg-pagecopy-bdd/features-release
+# Column-level COMPRESSION and LZ4 are unavailable before PostgreSQL 14.
+RUN [ "$PG_VERSION" -ge 14 ] || rm /opt/pg-pagecopy-bdd/features/safety_lz4.feature
 CMD ["pg-pagecopy-bdd"]

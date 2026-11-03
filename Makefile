@@ -16,7 +16,7 @@ all: build
 
 check-pg-config:
 	@test -n "$(PG_CONFIG_PATH)" || { echo "pg_config not found in PATH; set PG_CONFIG" >&2; exit 1; }
-	@case "$(PG_VERSION)" in 16|17|18) ;; *) echo "PG_VERSION must be 16, 17 or 18" >&2; exit 1 ;; esac
+	@case "$(PG_VERSION)" in 13|16|17|18) ;; *) echo "PG_VERSION must be 13, 16, 17 or 18" >&2; exit 1 ;; esac
 	@test "$(DETECTED_PG_VERSION)" = "$(PG_VERSION)" || { \
 		echo "pg_config reports PostgreSQL $(DETECTED_PG_VERSION), requested $(PG_VERSION); fix PATH or PG_CONFIG" >&2; \
 		exit 1; \

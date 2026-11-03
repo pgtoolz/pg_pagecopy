@@ -345,7 +345,6 @@ Feature: Transfer validation and failure isolation
       INSERT INTO public.events VALUES (1, 'from tablespace', 'owner');
       ALTER TABLE public.events SET TABLESPACE attach_space;
       CREATE ROLE attach_owner LOGIN;
-      GRANT pg_checkpoint TO attach_owner;
       ALTER TABLE public.events OWNER TO attach_owner;
       """
     And the following SQL is executed on "target":

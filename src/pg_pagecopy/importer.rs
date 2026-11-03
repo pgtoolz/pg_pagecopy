@@ -202,6 +202,12 @@ fn create_target_inner(schema: &TableSchema, target_table: &str) -> Result<(), S
 #[allow(clippy::cast_possible_wrap)] // PostgreSQL constants are ASCII on either c_char signedness.
 fn reset_storage(rel: &Rel) {
     unsafe {
+        #[cfg(feature = "pg13")]
+        pg_sys::RelationSetNewRelfilenode(
+            rel.as_ptr(),
+            pg_sys::RELPERSISTENCE_PERMANENT as std::os::raw::c_char,
+        );
+        #[cfg(not(feature = "pg13"))]
         pg_sys::RelationSetNewRelfilenumber(
             rel.as_ptr(),
             pg_sys::RELPERSISTENCE_PERMANENT as std::os::raw::c_char,

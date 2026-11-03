@@ -7,6 +7,7 @@
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/xloginsert.h"
+#include "access/xact.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_index.h"
 #include "storage/bufmgr.h"
@@ -32,7 +33,11 @@ pc_test_empty_index_state(PG_FUNCTION_ARGS)
     index_rel = relation_open(index_oid, AccessExclusiveLock);
     if (index_rel->rd_rel->relkind != RELKIND_INDEX)
         elog(ERROR, "invalid-index fixture requires an index");
+#if PG_VERSION_NUM >= 160000
     RelationSetNewRelfilenumber(index_rel, index_rel->rd_rel->relpersistence);
+#else
+    RelationSetNewRelfilenode(index_rel, index_rel->rd_rel->relpersistence);
+#endif
 
     pg_index = relation_open(IndexRelationId, RowExclusiveLock);
     tuple = SearchSysCacheCopy1(INDEXRELID, ObjectIdGetDatum(index_oid));

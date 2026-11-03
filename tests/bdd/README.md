@@ -7,16 +7,21 @@
 ## Запуск
 
 ```sh
+make bdd PG_VERSION=13
 make bdd PG_VERSION=16
 make bdd PG_VERSION=17
 make bdd PG_VERSION=18
+make bdd PG_SOURCE=13 PG_TARGET=16
+make bdd PG_SOURCE=13 PG_TARGET=17
+make bdd PG_SOURCE=13 PG_TARGET=18
 make bdd PG_SOURCE=16 PG_TARGET=17
 make bdd PG_SOURCE=16 PG_TARGET=18
 make bdd PG_SOURCE=17 PG_TARGET=18
 ```
 
 `make bdd` собирает расширение со strict Clippy/tests, затем отдельный BDD image.
-Cross-major runner собирает все три варианта расширения и `Dockerfile.cross`,
+На PG13 `safety_lz4.feature` исключается: column `COMPRESSION` появился в PG14.
+Cross-major runner собирает все четыре варианта расширения и `Dockerfile.cross`,
 чтобы positive и negative scenarios имели все нужные major. Каждый postmaster
 использует `/usr/lib/postgresql/<major>/bin` и свою сборку `pg_pagecopy`.
 `PG_PAGECOPY_FEATURES` внутри образа можно заменить для запуска выбранного каталога
@@ -51,7 +56,7 @@ nix develop ./tests/bdd#pg18
   on/off. Проверяется отсутствие SIGABRT/recovery, не только текст SQL-ошибки.
 - `@safety-*`: независимо запускаемые отказы для fast defaults, OID-bearing
   types, collation drift, lz4 и испорченной source-страницы;
-- `@cross-major`: все пары 16→17, 16→18, 17→18 с checksums/WAL on/off,
+- `@cross-major`: пары 13→16/17/18, 16→17/18 и 17→18 с checksums/WAL on/off,
   `verify_heapam`, `bt_index_check(..., heapallindexed=true)` и явные negative
   scenarios с проверкой сохранившихся строк и счётчиков VACUUM.
 
@@ -61,7 +66,7 @@ nix develop ./tests/bdd#pg18
 - `world.rs` — состояние сценария и подстановка портов;
 - `postgres.rs` — versioned initdb/pg_ctl, SQL clients, cancellation и логи;
 - `steps.rs` — общие Given/When/Then с timeout и независимыми major/checksum;
-- `features/` — одинаковые feature-файлы для PG16–PG18;
+- `features/` — одинаковые feature-файлы для поддерживаемых major;
 - `cross-features/` — сценарии для mixed-major образа;
 - `fixtures.c` — только BDD: legacy tuple header, повреждение страницы и пустой
   invalid/not-ready index без metapage. Собирается отдельным Docker stage и

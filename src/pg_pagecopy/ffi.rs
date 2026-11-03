@@ -19,7 +19,11 @@ pub unsafe fn require_source_access() -> Result<(), String> {
 }
 
 pub unsafe fn require_target_owner(oid: pg_sys::Oid) -> Result<(), String> {
-    if pg_sys::object_ownercheck(pg_sys::RelationRelationId, oid, pg_sys::GetUserId()) {
+    #[cfg(feature = "pg13")]
+    let owned = pg_sys::pg_class_ownercheck(oid, pg_sys::GetUserId());
+    #[cfg(not(feature = "pg13"))]
+    let owned = pg_sys::object_ownercheck(pg_sys::RelationRelationId, oid, pg_sys::GetUserId());
+    if owned {
         return Ok(());
     }
     Err("target table must be owned by the current user".into())
@@ -736,7 +740,8 @@ pub fn index_catalog_metadata(oid: pg_sys::Oid) -> Result<(String, String), Stri
     }
     let shape = Spi::get_one_with_args::<String>(
         "SELECT (SELECT format('%s|%s|%s|%s|%s|%s|%s|%s', \
-           i.indnkeyatts, i.indnatts, i.indisunique, i.indnullsnotdistinct, \
+           i.indnkeyatts, i.indnatts, i.indisunique, \
+           coalesce((row_to_json(i)->>'indnullsnotdistinct')::boolean, false), \
            i.indkey, i.indoption, \
            coalesce((SELECT string_agg(format('%I.%I', n.nspname, o.opcname), ',' ORDER BY u.ord) \
              FROM unnest(i.indclass) WITH ORDINALITY AS u(oid, ord) \

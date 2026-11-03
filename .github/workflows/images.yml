@@ -29,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [16, 17, 18]
+        pg: [13, 16, 17, 18]
     steps:
       - name: Check out
         uses: actions/checkout@v4
