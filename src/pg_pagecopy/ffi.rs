@@ -226,6 +226,66 @@ impl Rel {
         }
     }
 
+    // c_char is u8 on Linux and i8 on macOS; relkind and persistence are ASCII.
+    #[allow(clippy::unnecessary_cast, clippy::cast_sign_loss)]
+    fn catalog_char(value: std::os::raw::c_char) -> char {
+        value as u8 as char
+    }
+
+    /// Catalog relkind byte as a char: `r`, `v`, `p`, ...
+    fn relkind_char(&self) -> char {
+        unsafe { Self::catalog_char((*(*self.0).rd_rel).relkind) }
+    }
+
+    fn persistence_char(&self) -> char {
+        unsafe { Self::catalog_char((*(*self.0).rd_rel).relpersistence) }
+    }
+
+    /// `None` for a plain logged table; otherwise its readable type name and
+    /// the shared reason a physical transfer is impossible. `pagecopy.check`
+    /// reports the type and every transfer path fails with the same text, so
+    /// the policy lives in exactly one place.
+    pub fn plain_logged_reason(&self) -> Option<(String, String)> {
+        if self.is_plain_logged_table() {
+            return None;
+        }
+        let kind = self.relkind_char();
+        let (what, partitioned) = match kind {
+            'p' => ("partitioned table", true),
+            'v' => ("view", false),
+            'm' => ("materialized view", false),
+            'S' => ("sequence", false),
+            'f' => ("foreign table", false),
+            'c' => ("composite type", false),
+            'i' => ("index", false),
+            'r' => {
+                if self.persistence_char() == 't' {
+                    ("temporary table", false)
+                } else {
+                    ("unlogged table", false)
+                }
+            }
+            other => {
+                return Some((
+                    format!("relkind {other}"),
+                    format!("relkind {other}: only plain logged tables transfer"),
+                ))
+            }
+        };
+        let reason = if partitioned {
+            Self::partitioned_reason()
+        } else {
+            format!("{what}: only plain logged tables transfer")
+        };
+        Some((what.to_owned(), reason))
+    }
+
+    /// Same policy for partitioned tables, reported separately because the
+    /// remedy differs: transfer each partition on its own.
+    pub fn partitioned_reason() -> String {
+        "partitioned: transfer partitions individually".to_owned()
+    }
+
     #[allow(clippy::cast_possible_wrap)]
     pub fn is_btree_am(&self) -> bool {
         unsafe {
@@ -534,6 +594,41 @@ fn access_method_name(relam: pg_sys::Oid) -> String {
 
 pub fn data_checksums_enabled() -> bool {
     unsafe { pg_sys::DataChecksumsEnabled() }
+}
+
+/// Size in bytes of one relation fork on disk: `main`, `vm`, or `fsm`.
+/// Catalog and smgr metadata only; no page contents are read.
+pub fn fork_size(oid: pg_sys::Oid, fork: &str) -> Result<i64, String> {
+    Spi::get_one_with_args::<i64>(
+        &format!("SELECT pg_relation_size($1::regclass, '{fork}')"),
+        &[oid.into()],
+    )
+    .map_err(|error| format!("read {fork} size: {error}"))?
+    .ok_or_else(|| format!("relation {oid} lost while reading {fork} size"))
+}
+
+/// Schema-qualified name of a relation OID for `pagecopy.check` rows.
+pub fn qualified_name(oid: pg_sys::Oid) -> Result<String, String> {
+    Spi::get_one_with_args::<String>(
+        "SELECT format('%s.%s', quote_ident(n.nspname), quote_ident(c.relname)) \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.oid = $1",
+        &[oid.into()],
+    )
+    .map_err(|error| format!("read relation name: {error}"))?
+    .ok_or_else(|| format!("relation {oid} lost while reading its name"))
+}
+
+/// The single chunk index of a TOAST relation.
+pub fn toast_index_oid(toast_oid: pg_sys::Oid) -> pg_sys::Oid {
+    Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT indexrelid FROM pg_catalog.pg_index WHERE indrelid = $1",
+        &[toast_oid.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(pg_sys::Oid::INVALID)
 }
 
 const CANONICAL_SQL_SETTINGS: [(&str, &str); 4] = [

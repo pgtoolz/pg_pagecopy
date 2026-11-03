@@ -121,12 +121,20 @@ not a merge. Progress: every 1024 pages a `NOTICE` fires and
 
 ## Preflight: `pagecopy.check`
 
-`pagecopy.check(source_relation)` reads the current database and reports the
-source-side transfer plan per index. It takes no DSN, opens no remote connection,
-and changes nothing. It reads catalogs under `AccessShareLock`, does not read
-relation pages, and does not wait for ordinary INSERT/UPDATE/DELETE writers.
-`pull` still revalidates the target and the current source state before
-transfer: a check passing is not a guarantee that a later pull will succeed.
+`pagecopy.check(source_relation)` reads the current database and reports
+the source-side transfer plan per relation. It takes no DSN, opens no remote
+connection, and changes nothing. It reads catalogs under `AccessShareLock`,
+does not read relation pages, and does not wait for ordinary
+INSERT/UPDATE/DELETE writers. `pull` still revalidates the target and the
+current source state before transfer: a check passing is not a guarantee that
+a later pull will succeed.
+
+Every file of the relation tree gets a row: the heap (`table`), its TOAST
+chain (`toast`, `toast index`), every user index, and the `vm`/`fsm` forks of
+each physically transferred object. `size` is the source file size in bytes.
+Fork rows exist only while the file exists and are never copied (`method
+`none``): the target starts with empty forks, so all-visible bits return only
+after a target VACUUM.
 
 - `physical` — pages copied as-is, usable right after the transfer;
 - `definition` — recreated from its definition, then marked invalid
@@ -136,26 +144,33 @@ transfer: a check passing is not a guarantee that a later pull will succeed.
 - `error` — the source-side transfer plan is unsupported (unsafe column type,
   custom opclass, or another catalog restriction).
 
-The first row always describes the relation itself and can report `error`
-for an unsupported heap type. Rows are unordered, so sort by `index_name` for
-a stable listing:
+The first row always describes the relation itself (`type` `table`) and can
+report `error` for an unsupported column type. A relation that cannot
+transfer at all — view, materialized view, unlogged or partitioned table,
+sequence, foreign table — yields exactly one `error` row, and `pull` fails
+with the same text: one shared policy, no drift between check and transfer.
+Rows are unordered, so sort by `name` for a stable listing:
 
 ```sql
 -- Execute on the source database.
 SELECT * FROM pagecopy.check('public.events')
-ORDER BY index_name;
+ORDER BY name;
 ```
 
 Example output:
 
 ```text
- index_name    | supported | method     | detail
----------------+-----------+------------+-----------------------------------------------------------
- events_custom | f         | error      | custom opclasses are not supported; only pg_catalog btree opclasses are allowed
- events_hash   | t         | definition | index access method hash
- events_key    | t         | definition | invalid on source
- events_valid  | t         | physical   |
- public.events | t         | physical   |
+ name                      | type        | supported | method     | size  | detail
+---------------------------+-------------+-----------+------------+-------+-----------------------------------------------------------
+ events_custom             | index       | f         | error      |  8192 | custom opclasses are not supported; only pg_catalog btree opclasses are allowed
+ events_hash               | index       | t         | definition |  8192 | index access method hash
+ events_key                | index       | t         | definition |  8192 | invalid on source
+ events_valid              | index       | t         | physical   | 16384 |
+ pg_toast.pg_toast_16401   | toast       | t         | physical   |  8192 |
+ pg_toast.pg_toast_16401_index | toast index | t     | physical   |  8192 |
+ public.events             | table       | t         | physical   | 24576 |
+ public.events             | vm          | t         | none       |  8192 | not copied; target starts empty
+ public.events             | fsm         | t         | none       | 24576 | not copied; target starts empty
 ```
 
 ## Limits

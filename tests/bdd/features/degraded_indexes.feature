@@ -293,7 +293,7 @@ Feature: Unsupported secondary indexes survive as rebuildable definitions
       CREATE SCHEMA app;
       CREATE VIEW public.events AS SELECT 42 AS id;
       """
-    Then the following SQL on "target" fails with "target must be a plain logged table":
+    Then the following SQL on "target" fails with "target: view: only plain logged tables transfer":
       """
       SET search_path = app, public, pg_catalog;
       SELECT pagecopy.pull(

@@ -87,46 +87,141 @@ unsafe fn classify_index_with<T>(
     }
 }
 
-/// One row per source relation and index for `pagecopy.check`: the heap itself,
-/// then how every index would transfer. Read-only; performs no transfer.
+/// One `pagecopy.check` result row: name, type, supported, method, size, detail.
+type CheckRow = (String, String, bool, String, i64, String);
+
+/// Fork rows exist only while the source file exists; the transfer never
+/// copies them, and the target starts with empty forks.
+const FORK_DETAIL: &str = "not copied; target starts empty";
+
+fn fork_rows(name: &str, oid: pg_sys::Oid) -> Result<Vec<CheckRow>, String> {
+    let mut rows = Vec::new();
+    for (fork, size) in [
+        ("vm", ffi::fork_size(oid, "vm")?),
+        ("fsm", ffi::fork_size(oid, "fsm")?),
+    ] {
+        if size > 0 {
+            rows.push((
+                name.to_owned(),
+                fork.to_owned(),
+                true,
+                "none".to_owned(),
+                size,
+                FORK_DETAIL.to_owned(),
+            ));
+        }
+    }
+    Ok(rows)
+}
+
+/// One row per source file for `pagecopy.check`: the heap (`table`), its
+/// TOAST chain (`toast`, `toast index`), every user index, and the `vm`/`fsm`
+/// forks of each physically transferred object. `size` is the source file
+/// size in bytes; degraded indexes carry their source size with
+/// `method definition`. A relation that cannot transfer at all (view,
+/// unlogged, partitioned, ...) yields a single error row using the same
+/// shared reason as every transfer path.
+/// Read-only; performs no transfer.
 ///
 /// # Safety
 /// Opens source relations under `AccessShareLock` until the statement ends;
 /// blocks concurrent DDL only, never writers.
-pub unsafe fn check_index(
-    source_table: &str,
-) -> Result<Vec<(String, bool, String, String)>, String> {
+pub unsafe fn check_index(source_table: &str) -> Result<Vec<CheckRow>, String> {
     ffi::require_source_access()?;
     let source_oid = ffi::resolve_relation(source_table)?;
     let source = Rel::open(source_oid, pg_sys::AccessShareLock.cast_signed());
-    if !source.is_plain_logged_table() {
-        return Err("source must be a plain logged table".into());
+    if let Some((type_name, reason)) = source.plain_logged_reason() {
+        return Ok(vec![(
+            source_table.to_owned(),
+            type_name,
+            false,
+            "error".to_owned(),
+            ffi::fork_size(source_oid, "main")?,
+            reason,
+        )]);
     }
     let heap = source
         .attributes()
         .and_then(|attributes| wire::validate_attributes(&attributes));
+    let heap_size = ffi::fork_size(source_oid, "main")?;
     let mut rows = vec![match heap {
         Ok(()) => (
             source_table.to_owned(),
+            "table".to_owned(),
             true,
             "physical".to_owned(),
+            heap_size,
             String::new(),
         ),
-        Err(reason) => (source_table.to_owned(), false, "error".to_owned(), reason),
+        Err(reason) => (
+            source_table.to_owned(),
+            "table".to_owned(),
+            false,
+            "error".to_owned(),
+            heap_size,
+            reason,
+        ),
     }];
+    rows.extend(fork_rows(source_table, source_oid)?);
+    let toast_oid = source.toast_oid();
+    if toast_oid != pg_sys::Oid::INVALID {
+        let toast_name = ffi::qualified_name(toast_oid)?;
+        rows.push((
+            toast_name.clone(),
+            "toast".to_owned(),
+            true,
+            "physical".to_owned(),
+            ffi::fork_size(toast_oid, "main")?,
+            String::new(),
+        ));
+        rows.extend(fork_rows(&toast_name, toast_oid)?);
+        let toast_index = ffi::toast_index_oid(toast_oid);
+        if toast_index != pg_sys::Oid::INVALID {
+            let index_name = ffi::qualified_name(toast_index)?;
+            rows.push((
+                index_name.clone(),
+                "toast index".to_owned(),
+                true,
+                "physical".to_owned(),
+                ffi::fork_size(toast_index, "main")?,
+                String::new(),
+            ));
+            rows.extend(fork_rows(&index_name, toast_index)?);
+        }
+    }
     for index_oid in source.index_oids() {
         let index = Rel::open(index_oid, pg_sys::AccessShareLock.cast_signed());
-        let row =
-            match classify_index_with(&index, |oid| ffi::index_catalog_metadata(oid).map(|_| ())) {
-                Ok(ClassifyIndex::Physical(())) => {
-                    (index.name(), true, "physical".to_owned(), String::new())
-                }
-                Ok(ClassifyIndex::Invalid { reason, .. }) => {
-                    (index.name(), true, "definition".to_owned(), reason)
-                }
-                Err(reason) => (index.name(), false, "error".to_owned(), reason),
-            };
-        rows.push(row);
+        let index_name = index.name();
+        let size = ffi::fork_size(index_oid, "main")?;
+        match classify_index_with(&index, |oid| ffi::index_catalog_metadata(oid).map(|_| ())) {
+            Ok(ClassifyIndex::Physical(())) => {
+                rows.push((
+                    index_name.clone(),
+                    "index".to_owned(),
+                    true,
+                    "physical".to_owned(),
+                    size,
+                    String::new(),
+                ));
+                rows.extend(fork_rows(&index_name, index_oid)?);
+            }
+            Ok(ClassifyIndex::Invalid { reason, .. }) => rows.push((
+                index_name,
+                "index".to_owned(),
+                true,
+                "definition".to_owned(),
+                size,
+                reason,
+            )),
+            Err(reason) => rows.push((
+                index_name,
+                "index".to_owned(),
+                false,
+                "error".to_owned(),
+                size,
+                reason,
+            )),
+        }
     }
     Ok(rows)
 }
@@ -140,8 +235,8 @@ pub unsafe fn build_manifest(
     ffi::require_source_access()?;
     let source_oid = ffi::resolve_relation(source_table)?;
     let source = Rel::open(source_oid, pg_sys::ShareLock.cast_signed());
-    if !source.is_plain_logged_table() {
-        return Err("source must be a plain logged table".into());
+    if let Some((_type_name, reason)) = source.plain_logged_reason() {
+        return Err(reason);
     }
     if ffi::data_checksums_enabled() != target_checksums {
         return Err("source and target data_checksums differ".into());
@@ -608,8 +703,8 @@ pub unsafe fn source_is_frozen(source_table: &str) -> Result<bool, String> {
     ffi::require_source_access()?;
     let source_oid = ffi::resolve_relation(source_table)?;
     let source = Rel::open(source_oid, pg_sys::AccessExclusiveLock.cast_signed());
-    if !source.is_plain_logged_table() {
-        return Err("source must be a plain logged table".into());
+    if let Some((_type_name, reason)) = source.plain_logged_reason() {
+        return Err(reason);
     }
     source.flush_buffers();
     if !relation_is_frozen(&source) {
@@ -636,8 +731,8 @@ pub unsafe fn lock_source(source_table: &str) -> Result<(), String> {
     ffi::require_source_access()?;
     let oid = ffi::resolve_relation(source_table)?;
     let relation = Rel::open(oid, pg_sys::AccessExclusiveLock.cast_signed());
-    if !relation.is_plain_logged_table() {
-        return Err("source must be a plain logged table".into());
+    if let Some((_type_name, reason)) = relation.plain_logged_reason() {
+        return Err(reason);
     }
     // LOCK TABLE on the heap does not stop nextval() on owned sequences;
     // lock them too so their state cannot drift before the target setval.

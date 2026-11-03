@@ -239,12 +239,19 @@ pub mod pg_pagecopy {
         }
     }
 
-    /// Read-only catalog plan for a relation in the current (source) database.
-    /// Uses `AccessShareLock` without reading relation pages or blocking writers;
-    /// `pagecopy.pull` revalidates the target and current source state.
-    /// The first row is the relation itself; indexes that cannot move as page
-    /// images transfer as definitions and stay INVALID on the target until
-    /// REINDEX, so their constraints are not enforced until then.
+    /// Read-only file inventory for a relation in the current (source)
+    /// database: one row per file of the relation tree (heap, TOAST chain,
+    /// every user index, and the vm/fsm forks of each physically transferred
+    /// object), with its source size in bytes and how it will transfer.
+    /// Uses `AccessShareLock` without reading relation pages or blocking
+    /// writers; `pagecopy.pull` revalidates the target and current source
+    /// state. Forks are never copied: the target starts with empty forks, so
+    /// all-visible bits return only after a target VACUUM. Indexes that
+    /// cannot move as page images transfer as definitions and stay INVALID on
+    /// the target until REINDEX, so their constraints are not enforced until
+    /// then. A relation that cannot transfer at all (view, unlogged,
+    /// partitioned, ...) yields one error row with the same text every
+    /// transfer path fails with: one shared policy, no drift.
     ///
     /// # Panics
     /// Panics if the relation cannot be resolved or its catalog cannot be read.
@@ -255,9 +262,11 @@ pub mod pg_pagecopy {
     ) -> TableIterator<
         'static,
         (
-            name!(index_name, String),
+            name!(name, String),
+            name!(type, String),
             name!(supported, bool),
             name!(method, String),
+            name!(size, i64),
             name!(detail, String),
         ),
     > {

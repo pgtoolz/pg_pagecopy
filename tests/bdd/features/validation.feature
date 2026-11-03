@@ -404,7 +404,7 @@ Feature: Transfer validation and failure isolation
       );
       INSERT INTO public.events VALUES (42, 'keep', 'old');
       """
-    Then the following SQL on "target" fails with "source must be a plain logged table":
+    Then the following SQL on "target" fails with "unlogged table: only plain logged tables transfer":
       """
       SELECT pagecopy.pull(
         'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',

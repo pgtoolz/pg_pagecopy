@@ -475,8 +475,8 @@ unsafe fn open_target(schema: &TableSchema, target_table: &str) -> Result<Target
     let main = Rel::open(target_oid, pg_sys::AccessExclusiveLock.cast_signed());
     // Ownership may have changed while waiting for ACCESS EXCLUSIVE.
     ffi::require_target_owner(target_oid)?;
-    if !main.is_plain_logged_table() {
-        return Err("target must be a plain logged table".into());
+    if let Some((_type_name, reason)) = main.plain_logged_reason() {
+        return Err(format!("target: {reason}"));
     }
     let unsupported_constraints = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint \

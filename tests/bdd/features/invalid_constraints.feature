@@ -180,28 +180,28 @@ Feature: Constraint-backed and invalid source indexes transfer as invalid defini
       """
     Then the following SQL on "source" returns "events_custom:error,events_hash:definition,events_key:definition,events_valid:physical,public.events:physical":
       """
-      SELECT string_agg(index_name || ':' || method, ',' ORDER BY index_name)
-      FROM pagecopy.check('public.events');
+      SELECT string_agg(name || ':' || method, ',' ORDER BY name)
+      FROM pagecopy.check('public.events') WHERE name NOT LIKE 'pg_toast.%';
       """
     And the following SQL on "source" returns "t|physical|":
       """
-      SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE index_name = 'events_valid';
+      SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE name = 'events_valid';
       """
     And the following SQL on "source" returns "t|physical|":
       """
-      SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE index_name = 'public.events';
+      SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE name = 'public.events';
       """
     And the following SQL on "source" returns "t|definition|index access method hash":
       """
-      SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE index_name = 'events_hash';
+      SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE name = 'events_hash';
       """
     And the following SQL on "source" returns "t|definition|invalid on source":
       """
-      SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE index_name = 'events_key';
+      SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE name = 'events_key';
       """
     And the following SQL on "source" returns "f|error|custom opclasses are not supported; only pg_catalog btree opclasses are allowed":
       """
-      SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE index_name = 'events_custom';
+      SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE name = 'events_custom';
       """
 
   Scenario: Degraded matching rejects unique and nonunique definition collisions
@@ -372,11 +372,100 @@ Feature: Constraint-backed and invalid source indexes transfer as invalid defini
       """
     Then the following SQL on "source" returns "f|error|column current_mood has unsafe type public.mood; only built-in types without catalog OIDs in their values are supported":
       """
-      SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE index_name = 'public.events';
+      SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE name = 'public.events';
       """
     And the following SQL on "source" returns "t|physical":
       """
-      SELECT supported, method FROM pagecopy.check('public.events') WHERE index_name = 'events_id';
+      SELECT supported, method FROM pagecopy.check('public.events') WHERE name = 'events_id';
+      """
+
+  Scenario: pagecopy.check reports non-transferable relations as error rows
+    Given a fresh PostgreSQL pair
+    And the following SQL is executed on "source":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE VIEW public.events_v AS SELECT 1 AS id;
+      CREATE UNLOGGED TABLE public.events_u (id integer);
+      CREATE TABLE public.events_p (id integer) PARTITION BY RANGE (id);
+      """
+    Then the following SQL on "source" returns "public.events_v|view|f|error":
+      """
+      SELECT name, type, supported, method
+      FROM pagecopy.check('public.events_v');
+      """
+    And the following SQL on "source" returns "view: only plain logged tables transfer":
+      """
+      SELECT detail FROM pagecopy.check('public.events_v');
+      """
+    And the following SQL on "source" returns "public.events_u|unlogged table|f|error":
+      """
+      SELECT name, type, supported, method
+      FROM pagecopy.check('public.events_u');
+      """
+    And the following SQL on "source" returns "unlogged table: only plain logged tables transfer":
+      """
+      SELECT detail FROM pagecopy.check('public.events_u');
+      """
+    And the following SQL on "source" returns "public.events_p|partitioned table|f|error":
+      """
+      SELECT name, type, supported, method
+      FROM pagecopy.check('public.events_p');
+      """
+    And the following SQL on "source" returns "partitioned: transfer partitions individually":
+      """
+      SELECT detail FROM pagecopy.check('public.events_p');
+      """
+
+  Scenario: pagecopy.check inventories every relation file with its size
+    Given a fresh PostgreSQL pair
+    And the following SQL is executed on "source":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.events (id integer, note text);
+      CREATE INDEX events_id ON public.events USING btree (id);
+      INSERT INTO public.events VALUES (1, repeat('x', 10000));
+      """
+    And the following SQL is executed on "source":
+      """
+      VACUUM public.events;
+      """
+    Then the following SQL on "source" returns "table|t|physical|8192":
+      """
+      SELECT type, supported, method, size
+      FROM pagecopy.check('public.events')
+      WHERE name = 'public.events' AND method = 'physical';
+      """
+    And the following SQL on "source" returns "vm|t|none|8192|not copied; target starts empty":
+      """
+      SELECT type, supported, method, size, detail
+      FROM pagecopy.check('public.events')
+      WHERE name = 'public.events' AND type = 'vm';
+      """
+    And the following SQL on "source" returns "fsm|t|none|24576|not copied; target starts empty":
+      """
+      SELECT type, supported, method, size, detail
+      FROM pagecopy.check('public.events')
+      WHERE name = 'public.events' AND type = 'fsm';
+      """
+    And the following SQL on "source" returns "toast|t|physical|0":
+      """
+      SELECT type, supported, method, size
+      FROM pagecopy.check('public.events') WHERE type = 'toast';
+      """
+    And the following SQL on "source" returns "toast index|t|physical|8192":
+      """
+      SELECT type, supported, method, size
+      FROM pagecopy.check('public.events') WHERE type = 'toast index';
+      """
+    And the following SQL on "source" returns "index|t|physical|16384":
+      """
+      SELECT type, supported, method, size
+      FROM pagecopy.check('public.events')
+      WHERE name = 'events_id' AND method = 'physical';
+      """
+    And the following SQL on "source" returns "1":
+      """
+      SELECT count(*) FROM pagecopy.check('public.events') WHERE type = 'vm';
       """
 
   Scenario: pagecopy.check does not wait for an ordinary source writer

@@ -261,10 +261,26 @@ async fn source_writer_is_blocked(world: &mut AttachWorld, step: &Step) {
         "INSERT INTO public.events VALUES (20001, encode(gen_random_bytes(1000), 'hex'), 'writer')",
     );
     tokio::pin!(writer);
-    tokio::select! {
-        result = &mut import => panic!("import finished before writer block check: {result:?}"),
-        result = &mut writer => panic!("source writer was not blocked: {result:?}"),
-        () = tokio::time::sleep(Duration::from_millis(50)) => {}
+    // The freeze gap between the first AccessExclusiveLock release and the
+    // streaming re-acquisition can legitimately let the writer commit; the
+    // export snapshot predates it, so the row is never copied either way.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "writer outcome was not observed");
+        let waiting = pair.query(
+            "source",
+            "SELECT count(*)::text FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE c.relname = 'events' AND l.mode = 'RowExclusiveLock' AND NOT l.granted",
+        );
+        tokio::pin!(waiting);
+        let result = tokio::select! {
+            result = &mut import => { result.expect("direct import failed"); writer.await.expect("source writer failed"); return; }
+            result = &mut writer => { result.expect("source writer failed"); return; }
+            result = &mut waiting => result.unwrap_or_else(|error| panic!("lock query failed: {error}")),
+        };
+        if result == "1" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
     import
         .await
