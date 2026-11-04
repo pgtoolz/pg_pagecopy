@@ -2,7 +2,9 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
@@ -51,9 +53,28 @@ jobs:
           if-no-files-found: ignore
 
   cross-major-matrix:
-    name: PostgreSQL 13-18 / 15 upgrade pairs
+    name: PostgreSQL ${{ matrix.source }} -> ${{ matrix.target }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { source: 13, target: 14 }
+          - { source: 13, target: 15 }
+          - { source: 13, target: 16 }
+          - { source: 13, target: 17 }
+          - { source: 13, target: 18 }
+          - { source: 14, target: 15 }
+          - { source: 14, target: 16 }
+          - { source: 14, target: 17 }
+          - { source: 14, target: 18 }
+          - { source: 15, target: 16 }
+          - { source: 15, target: 17 }
+          - { source: 15, target: 18 }
+          - { source: 16, target: 17 }
+          - { source: 16, target: 18 }
+          - { source: 17, target: 18 }
     env:
       BUILDER_REGISTRY: ghcr.io/${{ github.repository }}
     steps:
@@ -73,18 +94,12 @@ jobs:
           exit 1
 
       - name: Build, lint and run cross-major BDD scenarios
-        run: |
-          for source in 13 14 15 16 17; do
-            for target in $(seq $((source + 1)) 18); do
-              echo "=== PostgreSQL ${source} -> ${target} ==="
-              make bdd PG_SOURCE="$source" PG_TARGET="$target"
-            done
-          done
+        run: make bdd PG_SOURCE=${{ matrix.source }} PG_TARGET=${{ matrix.target }}
 
       - name: Upload cross-major BDD logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bdd-logs-cross-major
+          name: bdd-logs-cross-${{ matrix.source }}-${{ matrix.target }}
           path: target/bdd-logs/
           if-no-files-found: ignore
