@@ -51,10 +51,18 @@ pc_gin_metapage_ok(Page page, BlockNumber nblocks,
         *detail = "gin metapage is uninitialized";
         return false;
     }
-    /* GIN pages carry no page id: the opaque area is identified by size. */
-    if (PageGetSpecialSize(page) != MAXALIGN(sizeof(GinPageOpaqueData)))
+    /* GIN pages carry no page id: the opaque area is identified by size.
+     * Bind pd_special absolutely first: the size check alone derives from
+     * the header-advertised page size, which can pass while pointing the
+     * special area outside this buffer on a malformed header. */
+    if (phdr->pd_special != BLCKSZ - MAXALIGN(sizeof(GinPageOpaqueData)))
     {
         *detail = "gin metapage has an unexpected special area";
+        return false;
+    }
+    if (PageGetSpecialSize(page) != MAXALIGN(sizeof(GinPageOpaqueData)))
+    {
+        *detail = "gin metapage has an unexpected special area size";
         return false;
     }
     opaque = (GinPageOpaque) PageGetSpecialPointer(page);
@@ -94,10 +102,16 @@ pc_gin_metapage_ok(Page page, BlockNumber nblocks,
 
     if (metap->nPendingPages == 0)
     {
-        /* An empty pending list is initialized to InvalidBlockNumber. */
+        /* An empty pending list is initialized to InvalidBlockNumber with
+         * zeroed statistics (see GinInitMetabuffer / ginInsertCleanup). */
         if (metap->head != InvalidBlockNumber || metap->tail != InvalidBlockNumber)
         {
             *detail = "gin pending list pointers are set on an empty pending list";
+            return false;
+        }
+        if (metap->nPendingHeapTuples != 0 || metap->tailFreeSize != 0)
+        {
+            *detail = "gin pending list statistics are set on an empty pending list";
             return false;
         }
     }
@@ -116,6 +130,14 @@ pc_gin_metapage_ok(Page page, BlockNumber nblocks,
         if (metap->tail == InvalidBlockNumber || metap->tail >= nblocks)
         {
             *detail = "gin pending list tail is out of range";
+            return false;
+        }
+        /* Blocks 0 and 1 are reserved for the metapage and the entry-tree
+         * root; a pending list head or tail pointing there describes an
+         * impossible state. */
+        if (metap->head <= GIN_ROOT_BLKNO || metap->tail <= GIN_ROOT_BLKNO)
+        {
+            *detail = "gin pending list pointers overlap reserved pages";
             return false;
         }
         if (metap->tailFreeSize > GinListPageSize)
@@ -155,7 +177,8 @@ pc_gin_check_pending_list(Relation rel, BlockNumber nblocks,
         page = BufferGetPage(buffer);
         if (PageIsNew(page))
             elog(ERROR, "pg_pagecopy: gin pending list page %u is uninitialized", blkno);
-        if (PageGetSpecialSize(page) != MAXALIGN(sizeof(GinPageOpaqueData)))
+        if (((PageHeader) page)->pd_special != BLCKSZ - MAXALIGN(sizeof(GinPageOpaqueData)) ||
+            PageGetSpecialSize(page) != MAXALIGN(sizeof(GinPageOpaqueData)))
             elog(ERROR, "pg_pagecopy: gin pending list page %u has an unexpected special area", blkno);
         opaque = (GinPageOpaque) PageGetSpecialPointer(page);
         if (!GinPageIsList(page) || GinPageIsDeleted(page))

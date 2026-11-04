@@ -48,9 +48,15 @@ Feature: Non-btree indexes degrade and rebuild across major versions
              (SELECT count(*) FROM public.imported_events WHERE tags @> ARRAY[5])
       FROM pg_index i
       JOIN pg_class c ON c.oid = i.indexrelid
-      JOIN pg_am am ON am.oid = c.relam
-      WHERE i.indrelid = 'public.imported_events'::regclass AND am.amname = 'gin';
+      WHERE i.indrelid = 'public.imported_events'::regclass AND c.relname = 'events_gin';
       ROLLBACK;
+      """
+    And the following SQL on "target" returns "t":
+      """
+      SELECT NOT indisvalid
+      FROM pg_index i
+      JOIN pg_class c ON c.oid = i.indexrelid
+      WHERE i.indrelid = 'public.imported_events'::regclass AND c.relname = 'events_gin_expr';
       """
     When the following SQL is executed on "target":
       """

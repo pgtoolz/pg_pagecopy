@@ -292,6 +292,57 @@ Feature: GIN target matching, corruption and cancellation fail closed
       | 28     | gin pending list tail is out of range         |
       | 49     | gin metapage statistics exceed the index size |
 
+  Scenario: A source gin pending list pointing at a reserved page is rejected
+    Given a fresh PostgreSQL pair
+    And the following SQL is executed on "target":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.t (id integer PRIMARY KEY, tags integer[]);
+      CREATE INDEX t_tags ON public.t USING gin (tags);
+      INSERT INTO public.t SELECT i, ARRAY[i % 7, i % 3] FROM generate_series(1, 500) AS i;
+      CREATE FUNCTION pc_test_set_index_byte(regclass, integer, integer, integer)
+        RETURNS void AS 'pc_bdd_fixtures', 'pc_test_set_index_byte'
+        LANGUAGE C STRICT;
+      SELECT pc_test_set_index_byte('public.t_tags', 0, 24, 1);
+      """
+    Then the following SQL on "target" fails with "gin pending list pointers overlap reserved pages":
+      """
+      SELECT pagecopy.clone('public.t', 'public.t_copy', true);
+      """
+    And the following SQL on "target" returns "0|500|t":
+      """
+      SELECT (SELECT count(*) FROM pg_tables WHERE tablename = 't_copy'),
+             (SELECT count(*) FROM public.t),
+             (SELECT indisvalid AND indisready FROM pg_index
+              WHERE indexrelid = 'public.t_tags'::regclass)
+      """
+
+  Scenario: Empty-list gin pending statistics are validated
+    Given a fresh PostgreSQL pair
+    And the following SQL is executed on "target":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.t (id integer PRIMARY KEY, tags integer[]);
+      CREATE INDEX t_tags ON public.t USING gin (tags);
+      INSERT INTO public.t SELECT i, ARRAY[i % 7, i % 3] FROM generate_series(1, 500) AS i;
+      SELECT gin_clean_pending_list('public.t_tags');
+      CREATE FUNCTION pc_test_corrupt_index_byte(regclass, integer, integer)
+        RETURNS void AS 'pc_bdd_fixtures', 'pc_test_corrupt_index_byte'
+        LANGUAGE C STRICT;
+      SELECT pc_test_corrupt_index_byte('public.t_tags', 0, 40);
+      """
+    Then the following SQL on "target" fails with "gin pending list statistics are set on an empty pending list":
+      """
+      SELECT pagecopy.clone('public.t', 'public.t_copy', true);
+      """
+    And the following SQL on "target" returns "0|500|t":
+      """
+      SELECT (SELECT count(*) FROM pg_tables WHERE tablename = 't_copy'),
+             (SELECT count(*) FROM public.t),
+             (SELECT indisvalid AND indisready FROM pg_index
+              WHERE indexrelid = 'public.t_tags'::regclass)
+      """
+
   Scenario Outline: A corrupted incoming gin metapage fails verification on the target
     Given a fresh PostgreSQL pair
     And the following SQL is executed on "source":
