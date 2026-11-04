@@ -47,7 +47,7 @@ Feature: HASH target matching, corruption and cancellation fail closed
       | CREATE INDEX t_k ON public.t USING hash (k) WHERE k > 10;                                       |
       | CREATE INDEX t_k ON public.t USING hash ((k + 1));                                             |
 
-  Scenario: A missing or extra target hash index fails the transfer
+  Scenario Outline: A missing or extra target hash index fails the transfer
     Given a fresh PostgreSQL pair
     And the following SQL is executed on "source":
       """
@@ -60,10 +60,11 @@ Feature: HASH target matching, corruption and cancellation fail closed
       """
       CREATE EXTENSION pg_pagecopy;
       CREATE TABLE public.t (id integer PRIMARY KEY, k integer);
-      CREATE INDEX t_extra ON public.t USING hash (id);
+      <target_index_a>
+      <target_index_b>
       INSERT INTO public.t VALUES (9999, 1);
       """
-    Then the following SQL on "target" fails with "target lacks source index":
+    Then the following SQL on "target" fails with "<failure>":
       """
       SELECT pagecopy.pull(
         'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
@@ -77,6 +78,11 @@ Feature: HASH target matching, corruption and cancellation fail closed
              (SELECT indisvalid FROM pg_index WHERE indexrelid = 'public.t_extra'::regclass),
              (SELECT indisready FROM pg_index WHERE indexrelid = 'public.t_extra'::regclass)
       """
+
+    Examples:
+      | target_index_a                                   | target_index_b                                   | failure                   |
+      | CREATE INDEX t_extra ON public.t USING hash (id); |                                                  | target lacks source index |
+      | CREATE INDEX t_k ON public.t USING hash (k);      | CREATE INDEX t_extra ON public.t USING hash (id); | source and target index counts differ |
 
   Scenario: An invalid physical target hash index is not used for a physical source
     Given a fresh PostgreSQL pair
@@ -157,6 +163,59 @@ Feature: HASH target matching, corruption and cancellation fail closed
       | CREATE INDEX t_good ON public.t USING hash (k);  | CREATE INDEX t_bad ON public.t USING hash (k);   |
       | CREATE INDEX t_bad ON public.t USING hash (k);   | CREATE INDEX t_good ON public.t USING hash (k);  |
 
+  Scenario: An invalid first source entry routes around the only valid target
+    Given a fresh PostgreSQL pair
+    And the following SQL is executed on "source":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE FUNCTION pc_test_empty_index_state(regclass, boolean, boolean)
+        RETURNS void AS 'pc_bdd_fixtures', 'pc_test_empty_index_state' LANGUAGE C STRICT;
+      CREATE TABLE public.t (id integer PRIMARY KEY, k integer);
+      CREATE INDEX t_bad ON public.t USING hash (k);
+      CREATE INDEX t_good ON public.t USING hash (k);
+      INSERT INTO public.t SELECT i, i FROM generate_series(1, 200) AS i;
+      SELECT pc_test_empty_index_state('public.t_bad', false, false);
+      """
+    And the following SQL is executed on "target":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE FUNCTION pc_test_empty_index_state(regclass, boolean, boolean)
+        RETURNS void AS 'pc_bdd_fixtures', 'pc_test_empty_index_state' LANGUAGE C STRICT;
+      CREATE TABLE public.t (id integer PRIMARY KEY, k integer);
+      CREATE INDEX t_bad ON public.t USING hash (k);
+      CREATE INDEX t_good ON public.t USING hash (k);
+      INSERT INTO public.t VALUES (9999, 42);
+      SELECT pc_test_empty_index_state('public.t_bad', false, false);
+      """
+    When the following SQL is executed on "target":
+      """
+      SELECT pagecopy.pull(
+        'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
+        'public.t', 'public.t', true
+      );
+      """
+    Then the following SQL on "target" returns "t|t|f|f|200|1":
+      """
+      SELECT (SELECT indisvalid AND indisready FROM pg_index
+              WHERE indexrelid = 'public.t_good'::regclass),
+             (SELECT indisvalid FROM pg_index
+              WHERE indexrelid = 'public.t_good'::regclass),
+             (SELECT indisvalid FROM pg_index
+              WHERE indexrelid = 'public.t_bad'::regclass),
+             (SELECT indisready FROM pg_index
+              WHERE indexrelid = 'public.t_bad'::regclass),
+             (SELECT count(*) FROM public.t),
+             (SELECT count(*) FROM public.t WHERE k = 42);
+      """
+    And the following SQL on "target" contains "Index Scan using t_good":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      EXPLAIN (COSTS OFF) SELECT * FROM public.t WHERE k = 42;
+      ROLLBACK;
+      """
+
   Scenario Outline: A corrupted source hash metapage is rejected with "<detail>"
     Given a fresh PostgreSQL pair
     And the following SQL is executed on "source":
@@ -184,12 +243,25 @@ Feature: HASH target matching, corruption and cancellation fail closed
         'public.t', 'public.t', true
       );
       """
-    And the following SQL on "target" returns "1|9999|t":
+    And the following SQL on "target" returns "1|9999|t|1|0":
       """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
       SELECT (SELECT count(*) FROM public.t),
              (SELECT max(id) FROM public.t),
              (SELECT indisvalid AND indisready FROM pg_index
-              WHERE indexrelid = 'public.t_k'::regclass)
+              WHERE indexrelid = 'public.t_k'::regclass),
+             (SELECT count(*) FROM public.t WHERE k = 999999),
+             (SELECT count(*) FROM public.t WHERE k = 9999);
+      ROLLBACK;
+      """
+    And the following SQL on "target" contains "Index Scan using t_k":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      EXPLAIN (COSTS OFF) SELECT * FROM public.t WHERE k = 999999;
+      ROLLBACK;
       """
 
     Examples:
@@ -221,17 +293,31 @@ Feature: HASH target matching, corruption and cancellation fail closed
     Then the following SQL on "target" fails with "index metapage verification failed":
       """
       SET pagecopy.debug_corrupt_index_metapage_offset = <offset>;
+      SET pagecopy.debug_corrupt_index_ordinal = 1;
       SELECT pagecopy.pull(
         'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
         'public.t', 'public.t', true
       );
       """
-    And the following SQL on "target" returns "1|9999|t":
+    And the following SQL on "target" returns "1|9999|t|1|0":
       """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
       SELECT (SELECT count(*) FROM public.t),
              (SELECT max(id) FROM public.t),
              (SELECT indisvalid AND indisready FROM pg_index
-              WHERE indexrelid = 'public.t_k'::regclass)
+              WHERE indexrelid = 'public.t_k'::regclass),
+             (SELECT count(*) FROM public.t WHERE k = 999999),
+             (SELECT count(*) FROM public.t WHERE k = 9999);
+      ROLLBACK;
+      """
+    And the following SQL on "target" contains "Index Scan using t_k":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      EXPLAIN (COSTS OFF) SELECT * FROM public.t WHERE k = 999999;
+      ROLLBACK;
       """
 
     Examples:
@@ -272,17 +358,31 @@ Feature: HASH target matching, corruption and cancellation fail closed
         'public.t', 'public.t', true
       );
       """
-    And the following SQL on "target" returns "1|9999|t|t":
+    And the following SQL on "target" returns "1|9999|sentinel|t|t|1|0":
       """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
       SELECT (SELECT count(*) FROM public.t),
              (SELECT max(id) FROM public.t),
+             (SELECT note FROM public.t WHERE id = 9999),
              (SELECT indisvalid AND indisready FROM pg_index
               WHERE indexrelid = 'public.t_a'::regclass),
              (SELECT indisvalid AND indisready FROM pg_index
-              WHERE indexrelid = 'public.t_b'::regclass)
+              WHERE indexrelid = 'public.t_b'::regclass),
+             (SELECT count(*) FROM public.t WHERE k = 999999),
+             (SELECT count(*) FROM public.t WHERE k = 7);
+      ROLLBACK;
+      """
+    And the following SQL on "target" contains "Index Scan using t_a":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      EXPLAIN (COSTS OFF) SELECT * FROM public.t WHERE k = 999999;
+      ROLLBACK;
       """
 
-  Scenario Outline: A corrupted incoming hash bucket or bitmap page fails page verification
+  Scenario Outline: A corrupted incoming hash page header fails page verification
     Given a fresh PostgreSQL pair
     And the following SQL is executed on "source":
       """
@@ -291,7 +391,11 @@ Feature: HASH target matching, corruption and cancellation fail closed
       CREATE INDEX t_k ON public.t USING hash (k);
       INSERT INTO public.t SELECT i, i * 3 FROM generate_series(1, 2000) AS i;
       """
-    And the following SQL is executed on "target":
+    Then the following SQL on "source" returns "t":
+      """
+      SELECT pg_relation_size('public.t_k'::regclass) >= 6 * 8192;
+      """
+    Given the following SQL is executed on "target":
       """
       CREATE EXTENSION pg_pagecopy;
       CREATE TABLE public.t (id integer, k integer);
@@ -308,12 +412,25 @@ Feature: HASH target matching, corruption and cancellation fail closed
         'public.t', 'public.t', true
       );
       """
-    And the following SQL on "target" returns "1|9999|t":
+    And the following SQL on "target" returns "1|9999|t|1|0":
       """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
       SELECT (SELECT count(*) FROM public.t),
              (SELECT max(id) FROM public.t),
              (SELECT indisvalid AND indisready FROM pg_index
-              WHERE indexrelid = 'public.t_k'::regclass)
+              WHERE indexrelid = 'public.t_k'::regclass),
+             (SELECT count(*) FROM public.t WHERE k = 999999),
+             (SELECT count(*) FROM public.t WHERE k = 9999);
+      ROLLBACK;
+      """
+    And the following SQL on "target" contains "Index Scan using t_k":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      EXPLAIN (COSTS OFF) SELECT * FROM public.t WHERE k = 999999;
+      ROLLBACK;
       """
 
     Examples:
@@ -346,12 +463,25 @@ Feature: HASH target matching, corruption and cancellation fail closed
         'public.t', 'public.t', true
       );
       """
-    And the following SQL on "target" returns "1|9999|t":
+    And the following SQL on "target" returns "1|9999|t|1|0":
       """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
       SELECT (SELECT count(*) FROM public.t),
              (SELECT max(id) FROM public.t),
              (SELECT indisvalid AND indisready FROM pg_index
-              WHERE indexrelid = 'public.t_k'::regclass)
+              WHERE indexrelid = 'public.t_k'::regclass),
+             (SELECT count(*) FROM public.t WHERE k = 999999),
+             (SELECT count(*) FROM public.t WHERE k = 9999);
+      ROLLBACK;
+      """
+    And the following SQL on "target" contains "Index Scan using t_k":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      EXPLAIN (COSTS OFF) SELECT * FROM public.t WHERE k = 999999;
+      ROLLBACK;
       """
 
   Scenario: A dropped final incoming hash page ends the stream early
@@ -363,7 +493,11 @@ Feature: HASH target matching, corruption and cancellation fail closed
       CREATE INDEX t_k ON public.t USING hash (k);
       INSERT INTO public.t SELECT i, i * 3 FROM generate_series(1, 100) AS i;
       """
-    And the following SQL is executed on "target":
+    Then the following SQL on "source" returns "t":
+      """
+      SELECT pg_relation_size('public.t_k'::regclass) = 10 * 8192;
+      """
+    Given the following SQL is executed on "target":
       """
       CREATE EXTENSION pg_pagecopy;
       CREATE TABLE public.t (id integer, k integer);
@@ -379,12 +513,25 @@ Feature: HASH target matching, corruption and cancellation fail closed
         'public.t', 'public.t', true
       );
       """
-    And the following SQL on "target" returns "1|9999|t":
+    And the following SQL on "target" returns "1|9999|t|1|0":
       """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
       SELECT (SELECT count(*) FROM public.t),
              (SELECT max(id) FROM public.t),
              (SELECT indisvalid AND indisready FROM pg_index
-              WHERE indexrelid = 'public.t_k'::regclass)
+              WHERE indexrelid = 'public.t_k'::regclass),
+             (SELECT count(*) FROM public.t WHERE k = 999999),
+             (SELECT count(*) FROM public.t WHERE k = 9999);
+      ROLLBACK;
+      """
+    And the following SQL on "target" contains "Index Scan using t_k":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      EXPLAIN (COSTS OFF) SELECT * FROM public.t WHERE k = 999999;
+      ROLLBACK;
       """
 
   Scenario: Deterministic cancellation after a hash page rolls back and the source unlocks
@@ -415,14 +562,28 @@ Feature: HASH target matching, corruption and cancellation fail closed
         'public.t', 'public.t', true
       );
       """
-    Then the following SQL on "target" returns "1|9999|t|t":
+    Then the following SQL on "target" returns "1|9999|sentinel|t|t|1|0":
       """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
       SELECT (SELECT count(*) FROM public.t),
              (SELECT max(id) FROM public.t),
+             (SELECT payload FROM public.t WHERE id = 9999),
              (SELECT indisvalid AND indisready FROM pg_index
               WHERE indexrelid = 'public.t_a'::regclass),
              (SELECT indisvalid AND indisready FROM pg_index
-              WHERE indexrelid = 'public.t_b'::regclass)
+              WHERE indexrelid = 'public.t_b'::regclass),
+             (SELECT count(*) FROM public.t WHERE k = 999999),
+             (SELECT count(*) FROM public.t WHERE k = 37);
+      ROLLBACK;
+      """
+    And the following SQL on "target" contains "Index Scan using t_a":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      EXPLAIN (COSTS OFF) SELECT * FROM public.t WHERE k = 999999;
+      ROLLBACK;
       """
     And the following SQL on "source" returns "0|30000":
       """

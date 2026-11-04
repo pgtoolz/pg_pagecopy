@@ -111,9 +111,11 @@ Feature: Unapproved HASH indexes degrade while custom opclasses fail
         'public.t', 'public.t', true
       );
       """
-    Then the following SQL on "target" returns "2|0":
+    Then the following SQL on "target" returns "2|2|100":
       """
-      SELECT count(*), count(*) FILTER (WHERE indisvalid AND indisready)
+      SELECT count(*),
+             count(*) FILTER (WHERE NOT indisvalid AND NOT indisready),
+             (SELECT count(*) FROM public.t)
       FROM pg_index WHERE indrelid = 'public.t'::regclass;
       """
 

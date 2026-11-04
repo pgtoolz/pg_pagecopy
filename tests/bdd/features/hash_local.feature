@@ -109,6 +109,7 @@ Feature: pagecopy.clone transfers HASH indexes inside one cluster
     Then the following SQL on "target" fails with "index metapage verification failed":
       """
       SET pagecopy.debug_corrupt_index_metapage_offset = 24;
+      SET pagecopy.debug_corrupt_index_ordinal = 1;
       SELECT pagecopy.clone('public.t', 'public.auto_created', true);
       """
     Then the following SQL on "target" returns "0|0":

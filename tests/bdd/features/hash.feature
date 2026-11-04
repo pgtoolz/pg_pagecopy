@@ -211,6 +211,35 @@ Feature: Approved HASH indexes transfer as page images
              (SELECT count(*) FROM public.coll);
       ROLLBACK;
       """
+    When the following SQL is executed on "target":
+      """
+      CREATE TABLE public.pair AS
+        SELECT c1.a AS a1, c2.a AS a2
+        FROM public.coll c1 JOIN public.coll c2
+          ON hashint4(c1.a) = hashint4(c2.a) AND c1.a <> c2.a
+        LIMIT 1;
+      """
+    Then the following SQL on "target" returns "1|1":
+      """
+      SELECT (SELECT count(*) FROM public.coll, public.pair WHERE a = a1),
+             (SELECT count(*) FROM public.coll, public.pair WHERE a = a2);
+      """
+    And the following SQL on "target" contains "Index Scan using coll_a":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      EXPLAIN (COSTS OFF) SELECT count(*) FROM public.coll, public.pair WHERE a = a1;
+      ROLLBACK;
+      """
+    And the following SQL on "target" contains "Index Scan using coll_a":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      EXPLAIN (COSTS OFF) SELECT count(*) FROM public.coll, public.pair WHERE a = a2;
+      ROLLBACK;
+      """
     And the following SQL on "target" returns "5001":
       """
       SELECT count(DISTINCT a) FROM public.coll;
@@ -440,11 +469,18 @@ Feature: Approved HASH indexes transfer as page images
       CREATE INDEX mixed_btree ON public.mixed USING btree (note);
       CREATE INDEX mixed_brin ON public.mixed USING brin (id);
       CREATE INDEX mixed_gin ON public.mixed USING gin (to_tsvector('english', note));
+      ALTER TABLE public.mixed ALTER COLUMN payload SET STORAGE EXTERNAL;
       INSERT INTO public.mixed
-      SELECT i, i * 17, repeat('body-' || i, 60), 'note ' || (i % 97)
+      SELECT i, i * 17, repeat('body-' || i, 400), 'note ' || (i % 97)
       FROM generate_series(1, 2000) AS i;
       """
-    And the following SQL is executed on "target":
+    Then the following SQL on "source" returns "t":
+      """
+      SELECT pg_relation_size((SELECT reltoastrelid
+                                 FROM pg_class
+                                WHERE oid = 'public.mixed'::regclass)) > 0;
+      """
+    Given the following SQL is executed on "target":
       """
       CREATE EXTENSION pg_pagecopy;
       CREATE TABLE public.mixed (
@@ -458,6 +494,7 @@ Feature: Approved HASH indexes transfer as page images
       CREATE INDEX mixed_gin ON public.mixed USING gin (to_tsvector('english', note));
       CREATE INDEX reordered_id ON public.mixed USING hash (id);
       CREATE INDEX mixed_hash_k ON public.mixed USING hash (k);
+      ALTER TABLE public.mixed ALTER COLUMN payload SET STORAGE EXTERNAL;
       INSERT INTO public.mixed VALUES (9999, 1, 'sentinel', 'keep');
       """
     When the following SQL is executed on "target":
@@ -475,6 +512,12 @@ Feature: Approved HASH indexes transfer as page images
              (SELECT count(*) FROM public.mixed WHERE payload LIKE 'body-42%'),
              (SELECT count(*) FROM public.mixed WHERE k = 34 OR id = 500)
       FROM pg_index WHERE indrelid = 'public.mixed'::regclass;
+      """
+    And the following SQL on "target" returns "t|t|t":
+      """
+      SELECT (SELECT min(id) FROM public.mixed) = 1,
+             (SELECT count(*) FROM public.mixed WHERE id = 9999) = 0,
+             (SELECT count(*) FROM public.mixed WHERE payload = 'sentinel') = 0;
       """
     And the following SQL on "target" contains "Index Scan using mixed_hash_k on mixed":
       """

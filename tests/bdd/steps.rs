@@ -696,8 +696,8 @@ fn recorded_block_survives_recovery(world: &mut AttachWorld) {
 
 /// Replay of a standard-page full-page image preserves every byte outside
 /// `[pd_lower, pd_upper)` but always zero-fills the hole itself, and stamps
-/// the page LSN/checksum in the first 16 bytes; an all-zero page is restored
-/// with only that header stamp added.
+/// the page LSN/checksum in the first 16 bytes; an all-zero page is never
+/// stamped (`PageIsNew` guard) and must recover fully zero.
 #[then("the recorded target block is unchanged after crash recovery except the WAL hole")]
 fn recorded_block_survives_recovery_excluding_hole(world: &mut AttachWorld) {
     let path = world
@@ -720,9 +720,11 @@ fn recorded_block_survives_recovery_excluding_hole(world: &mut AttachWorld) {
         let start = usize::try_from(block).expect("block number fits usize") * BLOCK_SIZE;
         let recovered = &bytes[start..start + BLOCK_SIZE];
         if hash_page_is_all_zero(&expected) {
+            // Replay never stamps an uninitialized page (PageIsNew guard),
+            // so a reserved all-zero block must recover fully zero.
             assert!(
-                recovered[16..].iter().all(|byte| *byte == 0),
-                "crash recovery changed block {block} beyond the WAL header stamp"
+                recovered.iter().all(|byte| *byte == 0),
+                "crash recovery changed originally all-zero block {block}"
             );
             continue;
         }

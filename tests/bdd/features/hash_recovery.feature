@@ -80,6 +80,19 @@ Feature: HASH transfers survive WAL, checksum and restart combinations
     And the recorded target data file is removed
     And target postmaster is started
     Then the recorded target block is unchanged after crash recovery except the WAL hole
+    When the following SQL is executed on "target":
+      """
+      SELECT pagecopy.clone('public.sparse', 'public.sparse_after_recovery', true);
+      """
+    Then the following SQL on "target" returns "t|3000":
+      """
+      SELECT i.indisvalid AND i.indisready,
+             (SELECT count(*) FROM public.sparse_after_recovery)
+      FROM pg_index AS i
+      WHERE i.indrelid = 'public.sparse_after_recovery'::regclass
+        AND i.indexprs IS NULL AND i.indpred IS NULL
+        AND pg_get_indexdef(i.indexrelid) LIKE '%USING hash%';
+      """
     And the following SQL on "target" returns "t|3000|1":
       """
       BEGIN;
@@ -128,11 +141,77 @@ Feature: HASH transfers survive WAL, checksum and restart combinations
     And target relation "public.sparse_k" block 110 is recorded as a hash "all-zero" page
     And target postmaster is crashed and restarted
     Then the recorded target block is unchanged after crash recovery
-    And the following SQL on "target" returns "t|3000":
+    And the following SQL on "target" returns "t|3000|1":
       """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      SELECT (SELECT indisvalid AND indisready FROM pg_index
+                WHERE indexrelid = 'public.sparse_k'::regclass),
+             (SELECT count(*) FROM public.sparse),
+             (SELECT count(*) FROM public.sparse WHERE k = 3);
+      ROLLBACK;
+      """
+    And the following SQL on "target" contains "Index Scan using sparse_k":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      EXPLAIN (COSTS OFF) SELECT * FROM public.sparse WHERE k = 3;
+      ROLLBACK;
+      """
+    When the following SQL is executed on "target":
+      """
+      INSERT INTO public.sparse VALUES (9999, 3);
+      """
+    Then the following SQL on "target" returns "2":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      SELECT count(*) FROM public.sparse WHERE k = 3;
+      ROLLBACK;
+      """
+    And target data checksums verify after a clean shutdown
+
+  Scenario: WAL full-page images restore hash overflow and bitmap pages
+    Given a fresh PostgreSQL pair with checksums "enabled"
+    And the following SQL is executed on "source":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.dup (id integer PRIMARY KEY, k integer);
+      CREATE INDEX dup_k ON public.dup USING hash (k) WITH (fillfactor = 10);
+      INSERT INTO public.dup SELECT i, 42 FROM generate_series(1, 2500) AS i;
+      """
+    And the following SQL is executed on "target":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CHECKPOINT;
+      """
+    When the following SQL is executed on "target":
+      """
+      SELECT pagecopy.pull(
+        'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
+        'public.dup', 'public.dup', true
+      );
+      """
+    And target relation "public.dup_k" block 0 is recorded as a hash "meta" page
+    And target relation "public.dup_k" block 65 is recorded as a hash "bitmap" page
+    And target relation "public.dup_k" block 66 is recorded as a hash "overflow" page
+    And target postmaster is crashed
+    And the recorded target data file is removed
+    And target postmaster is started
+    Then the recorded target block is unchanged after crash recovery except the WAL hole
+    And the following SQL on "target" returns "t|2500|2500":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
       SELECT indisvalid AND indisready,
-             (SELECT count(*) FROM public.sparse)
-      FROM pg_index WHERE indexrelid = 'public.sparse_k'::regclass;
+             (SELECT count(*) FROM public.dup),
+             (SELECT count(*) FROM public.dup WHERE k = 42)
+      FROM pg_index WHERE indexrelid = 'public.dup_k'::regclass;
+      ROLLBACK;
       """
     And target data checksums verify after a clean shutdown
 
