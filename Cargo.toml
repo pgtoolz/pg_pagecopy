@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/pgtoolz/pg_pagecopy"
-description = "Physical table transfer between PostgreSQL 16-18 clusters, including upward upgrades"
+description = "Physical table transfer between PostgreSQL 13-18 clusters, including upward upgrades"
 autotests = false
 
 [lib]
@@ -13,6 +13,9 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["pg17"]
+pg13 = ["pgrx/pg13"]
+pg14 = ["pgrx/pg14"]
+pg15 = ["pgrx/pg15"]
 pg16 = ["pgrx/pg16"]
 pg17 = ["pgrx/pg17"]
 pg18 = ["pgrx/pg18"]

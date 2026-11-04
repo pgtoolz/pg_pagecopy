@@ -6,7 +6,10 @@ on:
       - main
     paths:
       - Dockerfile
+      - Cargo.toml
       - Cargo.lock
+      - build.rs
+      - pg_pagecopy.control
       - .github/workflows/images.yml
   workflow_dispatch:
 
@@ -26,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [16, 17, 18]
+        pg: [13, 14, 15, 16, 17, 18]
     steps:
       - name: Check out
         uses: actions/checkout@v4

@@ -1,8 +1,8 @@
 @cross-major @validation @review-collation
 Feature: Complete collation ordering identity is required
 
-  Scenario: Equal collation name and version with a different locale is rejected without changing the target
-    Given a fresh PostgreSQL 16 to 17 pair with checksums "disabled"
+  Scenario Outline: PostgreSQL <source_major> to <target_major> rejects equal collation name/version with a different locale
+    Given a fresh PostgreSQL <source_major> to <target_major> pair with checksums "disabled"
     And the following SQL is executed on "source":
       """
       CREATE EXTENSION pg_pagecopy;
@@ -44,3 +44,21 @@ Feature: Complete collation ordering identity is required
       """
       SELECT count(*), min(id), min(payload) FROM public.events;
       """
+
+    Examples:
+      | source_major | target_major |
+      | 13           | 14           |
+      | 13           | 15           |
+      | 13           | 16           |
+      | 13           | 17           |
+      | 13           | 18           |
+      | 14           | 15           |
+      | 14           | 16           |
+      | 14           | 17           |
+      | 14           | 18           |
+      | 15           | 16           |
+      | 15           | 17           |
+      | 15           | 18           |
+      | 16           | 17           |
+      | 16           | 18           |
+      | 17           | 18           |

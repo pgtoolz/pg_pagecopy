@@ -5,7 +5,10 @@
 #include "access/heaptoast.h"
 #include "access/htup_details.h"
 #include "access/nbtree.h"
+#if PG_VERSION_NUM >= 140000
 #include "access/toast_compression.h"
+#endif
+#include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "access/xlogrecord.h"
@@ -21,12 +24,14 @@
 #include "storage/checksum.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
+#include "utils/acl.h"
 #include "utils/fmgrprotos.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
 #include "utils/ruleutils.h"
 #include "utils/regproc.h"
 #include "utils/syscache.h"
+#include "utils/timestamp.h"
 
 typedef struct PcAttribute
 {
@@ -55,8 +60,34 @@ bool pc_heap_page_is_frozen(Page page);
 Oid
 pc_resolve_relation(const char *name)
 {
-    return RangeVarGetRelid(makeRangeVarFromNameList(stringToQualifiedNameList(name, NULL)),
-                            NoLock, true);
+    List       *names;
+
+#if PG_VERSION_NUM >= 160000
+    names = stringToQualifiedNameList(name, NULL);
+#else
+    names = stringToQualifiedNameList(name);
+#endif
+    return RangeVarGetRelid(makeRangeVarFromNameList(names), NoLock, true);
+}
+
+bool
+pc_target_owner(Oid relation_oid)
+{
+#if PG_VERSION_NUM >= 160000
+    return object_ownercheck(RelationRelationId, relation_oid, GetUserId());
+#else
+    return pg_class_ownercheck(relation_oid, GetUserId());
+#endif
+}
+
+void
+pc_reset_storage(Relation rel)
+{
+#if PG_VERSION_NUM >= 160000
+    RelationSetNewRelfilenumber(rel, RELPERSISTENCE_PERMANENT);
+#else
+    RelationSetNewRelfilenode(rel, RELPERSISTENCE_PERMANENT);
+#endif
 }
 
 void
@@ -117,7 +148,7 @@ pc_assert_heap_page_frozen(Relation rel, Page page, BlockNumber blkno)
 static void
 pc_finish_page(Page page, BlockNumber blkno, bool checksums)
 {
-    PageSetLSN(page, 1);
+    PageSetLSN(page, (XLogRecPtr) 1);
     ((PageHeader) page)->pd_prune_xid = 0;
     if (checksums)
 #if PG_VERSION_NUM >= 190000
@@ -318,22 +349,26 @@ pc_prepare_heap_page(Page page, Relation rel, BlockNumber blkno,
                 continue;
 
             value = (struct varlena *) DatumGetPointer(values[attno]);
+#if PG_VERSION_NUM >= 140000
             if (!target_lz4_supported && VARATT_IS_4B_C(value) &&
                 VARDATA_COMPRESSED_GET_COMPRESS_METHOD(value) == TOAST_LZ4_COMPRESSION_ID)
                 ereport(ERROR,
                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                          errmsg("pg_pagecopy: target does not support lz4-compressed inline values")));
+#endif
 
             if (VARATT_IS_EXTERNAL_ONDISK(value))
             {
                 varatt_external external;
 
                 VARATT_EXTERNAL_GET_POINTER(external, value);
+#if PG_VERSION_NUM >= 140000
                 if (!target_lz4_supported && VARATT_EXTERNAL_IS_COMPRESSED(external) &&
                     VARATT_EXTERNAL_GET_COMPRESS_METHOD(external) == TOAST_LZ4_COMPRESSION_ID)
                     ereport(ERROR,
                             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                              errmsg("pg_pagecopy: target does not support lz4-compressed TOAST values")));
+#endif
                 if (!patch_toast)
                     continue;
                 if (target_toast_oid == InvalidOid)
@@ -496,13 +531,35 @@ pc_write_page(Relation rel, ForkNumber fork, BlockNumber blkno, const char *page
 
     blocks = smgrnblocks(smgr, fork);
     if (blkno == blocks)
-        smgrextend(smgr, fork, blkno, page, false);
+        smgrextend(smgr, fork, blkno, (char *) page, false);
     else if (blkno < blocks)
-        smgrwrite(smgr, fork, blkno, page, false);
+        smgrwrite(smgr, fork, blkno, (char *) page, false);
     else
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("pg_pagecopy: non-contiguous block %u, relation has %u blocks", blkno, blocks)));
+}
+
+/* RelFileLocator replaced RelFileNode in PostgreSQL 16. */
+#if PG_VERSION_NUM >= 160000
+#define PC_SMGR_RELFILE(smgr) (&(smgr)->smgr_rlocator.locator)
+#else
+#define PC_SMGR_RELFILE(smgr) (&(smgr)->smgr_rnode.node)
+#endif
+
+static void
+pc_log_pages(SMgrRelation smgr, ForkNumber fork, int npages,
+             BlockNumber *blknos, Page *pages, bool page_std)
+{
+#if PG_VERSION_NUM >= 140000
+    log_newpages(PC_SMGR_RELFILE(smgr), fork, npages,
+                 blknos, pages, page_std);
+#else
+    int         i;
+
+    for (i = 0; i < npages; i++)
+        log_newpage(PC_SMGR_RELFILE(smgr), fork, blknos[i], pages[i], page_std);
+#endif
 }
 
 /*
@@ -541,14 +598,13 @@ pc_log_relation(Relation rel, ForkNumber fork)
         blknos[npending] = blkno;
         if (++npending == XLR_MAX_BLOCK_ID)
         {
-            log_newpages(&smgr->smgr_rlocator.locator, fork, npending,
-                         blknos, pages, fork == MAIN_FORKNUM);
+            pc_log_pages(smgr, fork, npending, blknos, pages,
+                         fork == MAIN_FORKNUM);
             npending = 0;
         }
     }
     if (npending > 0)
-        log_newpages(&smgr->smgr_rlocator.locator, fork, npending,
-                     blknos, pages, fork == MAIN_FORKNUM);
+        pc_log_pages(smgr, fork, npending, blknos, pages, fork == MAIN_FORKNUM);
 
     for (i = 0; i < XLR_MAX_BLOCK_ID; i++)
         pfree(pages[i]);

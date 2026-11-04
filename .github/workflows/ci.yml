@@ -12,11 +12,11 @@ jobs:
   postgres-matrix:
     name: PostgreSQL ${{ matrix.pg }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        pg: [16, 17, 18]
+        pg: [13, 14, 15, 16, 17, 18]
     env:
       PG_VERSION: ${{ matrix.pg }}
       BUILDER_REGISTRY: ghcr.io/${{ github.repository }}
@@ -51,22 +51,12 @@ jobs:
           if-no-files-found: ignore
 
   cross-major-matrix:
-    name: PostgreSQL ${{ matrix.source }} to ${{ matrix.target }}
+    name: PostgreSQL 13-18 / 15 upgrade pairs
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - source: 16
-            target: 17
-          - source: 16
-            target: 18
-          - source: 17
-            target: 18
     env:
-      SOURCE_PG_VERSION: ${{ matrix.source }}
-      TARGET_PG_VERSION: ${{ matrix.target }}
+      SOURCE_PG_VERSION: 13
+      TARGET_PG_VERSION: 16
       BUILDER_REGISTRY: ghcr.io/${{ github.repository }}
     steps:
       - name: Check out
@@ -91,6 +81,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bdd-logs-pg${{ matrix.source }}-pg${{ matrix.target }}
+          name: bdd-logs-cross-major
           path: target/bdd-logs/
           if-no-files-found: ignore

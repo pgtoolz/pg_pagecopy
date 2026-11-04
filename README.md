@@ -8,8 +8,8 @@ TOAST, visibility maps and plain btree indexes. No row decoding. On a
 and TOAST bloat, and shrinks on narrow heap-only tables — measure on your
 own data (`docs/benchmark-results.md`).
 
-Works on PostgreSQL 16, 17 and 18, for same-major transfers and upward
-upgrades (16→17, 16→18, 17→18). Downgrades are rejected.
+Works on PostgreSQL 13, 14, 15, 16, 17 and 18, for same-major transfers and
+all upward upgrades among those versions. Downgrades are rejected.
 
 ```sql
 -- both databases

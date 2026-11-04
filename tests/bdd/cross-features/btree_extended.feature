@@ -41,6 +41,18 @@ Feature: Partial and expression btree transfer physically across majors
 
     Examples:
       | source_major | target_major |
-      | 16 | 17 |
-      | 16 | 18 |
-      | 17 | 18 |
+      | 13           | 14           |
+      | 13           | 15           |
+      | 13           | 16           |
+      | 13           | 17           |
+      | 13           | 18           |
+      | 14           | 15           |
+      | 14           | 16           |
+      | 14           | 17           |
+      | 14           | 18           |
+      | 15           | 16           |
+      | 15           | 17           |
+      | 15           | 18           |
+      | 16           | 17           |
+      | 16           | 18           |
+      | 17           | 18           |

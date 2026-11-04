@@ -199,16 +199,6 @@ fn create_target_inner(schema: &TableSchema, target_table: &str) -> Result<(), S
     Ok(())
 }
 
-#[allow(clippy::cast_possible_wrap)] // PostgreSQL constants are ASCII on either c_char signedness.
-fn reset_storage(rel: &Rel) {
-    unsafe {
-        pg_sys::RelationSetNewRelfilenumber(
-            rel.as_ptr(),
-            pg_sys::RELPERSISTENCE_PERMANENT as std::os::raw::c_char,
-        );
-    }
-}
-
 #[allow(clippy::too_many_lines)] // Keep catalog matching and physical routing in one transaction.
 fn prepare_state(
     manifest: Manifest,
@@ -257,8 +247,11 @@ fn prepare_state(
         let IndexTransfer::Btree(expected) = &manifest.indexes[0] else {
             return Err("source TOAST index is not physical".into());
         };
-        if ffi::index_metadata(target.oid())? != *expected {
-            return Err("source and target TOAST btree metadata differ".into());
+        let actual = ffi::index_metadata(target.oid())?;
+        if !actual.has_same_physical_layout(expected) {
+            return Err(format!(
+                "source and target TOAST btree metadata differ: source={expected:?}, target={actual:?}"
+            ));
         }
     }
 
@@ -272,7 +265,8 @@ fn prepare_state(
         let position = match source_index {
             IndexTransfer::Btree(expected) => target_indexes.iter().position(|(_, index)| {
                 index.is_btree()
-                    && ffi::index_metadata(index.oid()).is_ok_and(|actual| actual == *expected)
+                    && ffi::index_metadata(index.oid())
+                        .is_ok_and(|actual| actual.has_same_physical_layout(expected))
             }),
             IndexTransfer::Invalid { definition, unique } => target_indexes
                 .iter()
@@ -306,7 +300,7 @@ fn prepare_state(
     }
 
     for target in &targets {
-        reset_storage(target);
+        target.reset_storage();
     }
     let mut routes = Vec::with_capacity(manifest.relations.len());
     let mut main_count = 0usize;
