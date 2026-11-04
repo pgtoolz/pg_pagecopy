@@ -6,6 +6,10 @@ use std::path::PathBuf;
 pub struct AttachWorld {
     pub pair: Option<PostgresPair>,
     pub recorded_data_file: Option<PathBuf>,
+    /// Recorded main-fork blocks (number and bytes) of the recorded target
+    /// relation, kept to prove WAL or no-WAL recovery restores their exact
+    /// bytes (BRIN revmap and summary contents).
+    pub recorded_relation_blocks: Vec<(u64, Vec<u8>)>,
 }
 
 impl AttachWorld {

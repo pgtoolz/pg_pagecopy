@@ -1,15 +1,16 @@
 //! Index classification, degradation and target matching shared by every
 //! transfer path. Catalog identity reads (definition, shape, opclass) come
-//! from `ffi` and btree physicals from [`btree`]; this module owns the
-//! policy: which index transfers as page images, which degrades to its
-//! definition, how each manifest index is matched and installed on the
-//! target, and how incoming index pages are verified against their manifest
-//! entries.
+//! from `ffi`, btree physicals from [`btree`] and brin physicals from
+//! [`brin`]; this module owns the policy: which index transfers as page
+//! images, which degrades to its definition, how each manifest index is
+//! matched and installed on the target, and how incoming index pages are
+//! verified against their manifest entries.
 
 use super::super::ffi::{self, Rel};
+use super::brin;
 use super::btree;
 use super::wire::IndexTransfer;
-use super::BtreeMetadata;
+use super::{BrinMetadata, BtreeMetadata};
 use pgrx::pg_sys;
 
 /// How one source index crosses to the target. The metadata callback selects
@@ -52,22 +53,52 @@ pub unsafe fn classify_index_with<T>(
     }
 }
 
+/// Physical metadata of the supported access methods; the access method is
+/// selected here from the index's relam, never at the call sites.
+pub enum PhysicalMetadata {
+    Btree(BtreeMetadata),
+    Brin(BrinMetadata),
+}
+
 /// Classify one opened source index for transfer, reading the full physical
-/// metadata of indexes that move as page images; the access method is
-/// selected here, never at the call sites.
+/// metadata of indexes that move as page images.
 ///
 /// # Safety
 /// Reads the source catalog; runs inside PostgreSQL.
-pub unsafe fn classify_index(index: &Rel) -> Result<ClassifyIndex<BtreeMetadata>, String> {
-    classify_index_with(index, btree::metadata)
+pub unsafe fn classify_index(index: &Rel) -> Result<ClassifyIndex<PhysicalMetadata>, String> {
+    classify_index_with(index, |oid| {
+        if index.is_brin_am() {
+            brin::metadata(oid).map(PhysicalMetadata::Brin)
+        } else {
+            btree::metadata(oid).map(PhysicalMetadata::Btree)
+        }
+    })
+}
+
+/// Catalog-only preflight mirroring [`classify_index`] for `pagecopy.check`:
+/// the same verdicts and degrade reasons without reading index pages.
+///
+/// # Safety
+/// Reads the source catalog; runs inside PostgreSQL.
+pub unsafe fn catalog_preflight(index: &Rel, index_oid: pg_sys::Oid) -> Result<(), String> {
+    if index.is_brin_am() {
+        brin::catalog_preflight(index_oid)
+    } else {
+        ffi::index_catalog_metadata(index_oid).map(|_| ())
+    }
 }
 
 /// Manifest entry for a classified source index: physical classifications
 /// transfer as page images, everything else degrades to its definition.
-impl From<ClassifyIndex<BtreeMetadata>> for IndexTransfer {
-    fn from(classified: ClassifyIndex<BtreeMetadata>) -> Self {
+impl From<ClassifyIndex<PhysicalMetadata>> for IndexTransfer {
+    fn from(classified: ClassifyIndex<PhysicalMetadata>) -> Self {
         match classified {
-            ClassifyIndex::Physical(metadata) => IndexTransfer::Btree(metadata),
+            ClassifyIndex::Physical(PhysicalMetadata::Btree(metadata)) => {
+                IndexTransfer::Btree(metadata)
+            }
+            ClassifyIndex::Physical(PhysicalMetadata::Brin(metadata)) => {
+                IndexTransfer::Brin(metadata)
+            }
             ClassifyIndex::Invalid {
                 definition,
                 unique,
@@ -110,7 +141,10 @@ pub unsafe fn toast_index_transfer(toast_index_oid: pg_sys::Oid) -> Result<Index
 pub fn verify_toast_layout(entry: &IndexTransfer, target: &Rel) -> Result<(), String> {
     match entry {
         IndexTransfer::Btree(expected) => btree::toast_layout(expected, target),
-        IndexTransfer::Invalid { .. } => Err("source TOAST index is not physical".into()),
+        // A TOAST index is always a btree; no other kind can be physical.
+        IndexTransfer::Invalid { .. } | IndexTransfer::Brin(_) => {
+            Err("source TOAST index is not physical".into())
+        }
     }
 }
 
@@ -119,21 +153,22 @@ pub fn verify_toast_layout(entry: &IndexTransfer, target: &Rel) -> Result<(), St
 pub fn physical_index(indexes: &[IndexTransfer], ordinal: usize) -> Option<&IndexTransfer> {
     indexes
         .iter()
-        .filter(|entry| matches!(entry, IndexTransfer::Btree(_)))
+        .filter(|entry| !matches!(entry, IndexTransfer::Invalid { .. }))
         .nth(ordinal)
 }
 
 /// Verify the first page of a physically transferred index against its
 /// manifest entry; entries that never stream fail closed.
-pub fn verify_index_metapage(entry: &IndexTransfer, page: &mut [u8]) -> bool {
+pub fn verify_index_metapage(entry: &IndexTransfer, page: &mut [u8], blocks: u32) -> bool {
     match entry {
         IndexTransfer::Btree(metadata) => btree::verify_metapage(page, metadata.all_equal_image),
+        IndexTransfer::Brin(metadata) => brin::verify_metapage(page, metadata, blocks),
         IndexTransfer::Invalid { .. } => false,
     }
 }
 
 /// Match every manifest user index to one target index and dispatch on the
-/// transfer kind: `Btree` matches are enabled and returned in manifest order
+/// transfer kind: physical matches are enabled and returned in manifest order
 /// for page installation, `Invalid` matches stay INVALID on the target with
 /// a warning. Every target index must be matched exactly once.
 pub fn match_user_indexes(
@@ -146,10 +181,22 @@ pub fn match_user_indexes(
             IndexTransfer::Btree(expected) => target_indexes
                 .iter()
                 .position(|(_, index)| btree::matches_layout(expected, index)),
+            IndexTransfer::Brin(expected) => target_indexes
+                .iter()
+                .position(|(_, index)| brin::matches_layout(expected, index)),
             IndexTransfer::Invalid { definition, unique } => target_indexes
                 .iter()
                 .position(|(candidate, index)| {
-                    candidate == definition && index.is_unique() == *unique && !index.is_btree()
+                    // Exclude every target that could be a physical
+                    // candidate: `is_btree`/`is_brin` are true only for a
+                    // valid, ready, non-exclusion index of that AM, so this
+                    // keeps invalid btree/brin targets preferred while a
+                    // degraded source entry can never consume the only valid
+                    // target matching a later physical source entry.
+                    candidate == definition
+                        && index.is_unique() == *unique
+                        && !index.is_btree()
+                        && !index.is_brin()
                 })
                 .or_else(|| {
                     target_indexes.iter().position(|(candidate, index)| {
@@ -160,7 +207,7 @@ pub fn match_user_indexes(
         .ok_or_else(|| format!("target lacks source index ({source_index:?})"))?;
         let (_, index) = target_indexes.remove(position);
         match source_index {
-            IndexTransfer::Btree(_) => {
+            IndexTransfer::Btree(_) | IndexTransfer::Brin(_) => {
                 index.set_validity(true);
                 physical.push(index);
             }

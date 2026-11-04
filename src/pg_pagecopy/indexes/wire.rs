@@ -1,10 +1,12 @@
 //! Index entries of the transfer manifest.
 //!
 //! Wire tags: `0` = btree (physical transfer), `1` = invalid
-//! (definition only). Existing manifests must decode identically; the tags
-//! are part of the format and never renumbered.
+//! (definition only), `2` = brin (physical transfer). Existing manifests
+//! must decode identically; the tags are part of the format and never
+//! renumbered.
 
 use super::super::wire::{put_string, put_u32, Decoder, Result, WireError};
+use super::brin::BrinMetadata;
 use super::btree::BtreeMetadata;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,6 +17,7 @@ pub enum IndexTransfer {
         definition: String,
         unique: bool,
     },
+    Brin(BrinMetadata),
 }
 
 /// Append one manifest index entry, including its wire tag.
@@ -32,6 +35,14 @@ pub fn encode_index(out: &mut Vec<u8>, index: &IndexTransfer) -> Result<()> {
             out.push(1);
             put_string(out, definition)?;
             out.push(u8::from(*unique));
+        }
+        IndexTransfer::Brin(metadata) => {
+            out.push(2);
+            put_string(out, &metadata.definition)?;
+            put_string(out, &metadata.shape)?;
+            put_u32(out, metadata.brin_version)?;
+            put_u32(out, metadata.pages_per_range)?;
+            put_u32(out, metadata.last_revmap_page)?;
         }
     }
     Ok(())
@@ -52,6 +63,13 @@ pub fn decode_index(decoder: &mut Decoder<'_>) -> Result<IndexTransfer> {
             definition: decoder.string()?,
             unique: decoder.boolean()?,
         },
+        2 => IndexTransfer::Brin(BrinMetadata {
+            definition: decoder.string()?,
+            shape: decoder.string()?,
+            brin_version: decoder.u32()?,
+            pages_per_range: decoder.u32()?,
+            last_revmap_page: decoder.u32()?,
+        }),
         kind => return Err(WireError(format!("unknown index transfer kind {kind}"))),
     })
 }
@@ -70,6 +88,16 @@ mod tests {
         }
     }
 
+    fn brin() -> BrinMetadata {
+        BrinMetadata {
+            definition: "brin (id) WITH (pages_per_range=4)".into(),
+            shape: "1|1|f|f|1|0|pg_catalog.int4_minmax_ops|".into(),
+            brin_version: 1,
+            pages_per_range: 4,
+            last_revmap_page: 1,
+        }
+    }
+
     #[test]
     fn index_entries_round_trip_through_the_manifest_decoder() {
         let entries = [
@@ -78,6 +106,7 @@ mod tests {
                 definition: "hash (payload)".into(),
                 unique: false,
             },
+            IndexTransfer::Brin(brin()),
         ];
         for entry in entries {
             let mut out = Vec::new();
@@ -87,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_tags_stay_zero_for_btree_and_one_for_invalid() {
+    fn wire_tags_stay_zero_one_two_for_btree_invalid_and_brin() {
         // Existing manifests carry these tag bytes; renumbering would strand them.
         let mut out = Vec::new();
         encode_index(&mut out, &IndexTransfer::Btree(btree())).unwrap();
@@ -102,9 +131,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out[0], 1);
+        let mut out = Vec::new();
+        encode_index(&mut out, &IndexTransfer::Brin(brin())).unwrap();
+        assert_eq!(out[0], 2);
         assert!(
-            decode_index(&mut Decoder::new(&[2])).is_err(),
-            "unknown index transfer kind 2"
+            decode_index(&mut Decoder::new(&[3])).is_err(),
+            "unknown index transfer kind 3"
         );
     }
 
@@ -137,6 +169,20 @@ mod tests {
         expected.extend_from_slice(&(u32::try_from(definition.len()).unwrap()).to_be_bytes());
         expected.extend_from_slice(definition);
         expected.extend_from_slice(&[0]);
+        assert_eq!(out, expected);
+
+        let mut out = Vec::new();
+        encode_index(&mut out, &IndexTransfer::Brin(brin())).unwrap();
+        let definition = b"brin (id) WITH (pages_per_range=4)";
+        let shape = b"1|1|f|f|1|0|pg_catalog.int4_minmax_ops|";
+        let mut expected = vec![2u8];
+        expected.extend_from_slice(&(u32::try_from(definition.len()).unwrap()).to_be_bytes());
+        expected.extend_from_slice(definition);
+        expected.extend_from_slice(&(u32::try_from(shape.len()).unwrap()).to_be_bytes());
+        expected.extend_from_slice(shape);
+        expected.extend_from_slice(&1u32.to_be_bytes());
+        expected.extend_from_slice(&4u32.to_be_bytes());
+        expected.extend_from_slice(&1u32.to_be_bytes());
         assert_eq!(out, expected);
     }
 }

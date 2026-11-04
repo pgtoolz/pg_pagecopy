@@ -13,6 +13,7 @@ fn pg_config(program: &str, key: &str) -> String {
 fn main() {
     println!("cargo:rerun-if-changed=src/page_shim.c");
     println!("cargo:rerun-if-changed=src/index_btree.c");
+    println!("cargo:rerun-if-changed=src/index_brin.c");
     println!("cargo:rerun-if-env-changed=PGRX_PG_CONFIG_PATH");
     println!("cargo:rerun-if-env-changed=PG_CONFIG");
 
@@ -22,6 +23,7 @@ fn main() {
     cc::Build::new()
         .file("src/page_shim.c")
         .file("src/index_btree.c")
+        .file("src/index_brin.c")
         .include(pg_config(&program, "--includedir-server"))
         .include(pg_config(&program, "--includedir"))
         .debug(true)

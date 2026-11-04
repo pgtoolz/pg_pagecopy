@@ -1,6 +1,7 @@
 use super::ffi::{self, Rel, FSM_FORK, MAIN_FORK, PAGE_SIZE, VM_FORK};
 use super::indexes::{
-    classify_index, classify_index_with, toast_index_transfer, toast_index_verdict, ClassifyIndex,
+    self, classify_index, classify_index_with, toast_index_transfer, toast_index_verdict,
+    ClassifyIndex,
 };
 use super::wire::{self, Manifest, Relation, RelationKind, SchemaColumn, SchemaIndex, TableSchema};
 use pgrx::iter::SetOfIterator;
@@ -194,7 +195,7 @@ pub unsafe fn check_index(source_table: &str) -> Result<Vec<CheckRow>, String> {
         let index = Rel::open(index_oid, pg_sys::AccessShareLock.cast_signed());
         let index_name = index.name();
         let size = ffi::fork_size(index_oid, "main")?;
-        match classify_index_with(&index, |oid| ffi::index_catalog_metadata(oid).map(|_| ())) {
+        match classify_index_with(&index, |oid| indexes::catalog_preflight(&index, oid)) {
             Ok(ClassifyIndex::Physical(())) => {
                 rows.push((
                     index_name.clone(),

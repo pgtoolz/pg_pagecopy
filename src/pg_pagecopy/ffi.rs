@@ -295,6 +295,15 @@ impl Rel {
     }
 
     #[allow(clippy::cast_possible_wrap)]
+    pub fn is_brin_am(&self) -> bool {
+        unsafe {
+            let rel = &*(*self.0).rd_rel;
+            rel.relkind == pg_sys::RELKIND_INDEX as std::os::raw::c_char
+                && rel.relam == pg_sys::BRIN_AM_OID
+        }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
     pub fn is_btree(&self) -> bool {
         unsafe {
             let relation = &*self.0;
@@ -309,6 +318,20 @@ impl Rel {
         }
     }
 
+    /// Same gate for brin: a real brin index that is valid, ready and not
+    /// part of an exclusion constraint.
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn is_brin(&self) -> bool {
+        unsafe {
+            let relation = &*self.0;
+            self.is_brin_am()
+                && !relation.rd_index.is_null()
+                && (*relation.rd_index).indisvalid
+                && (*relation.rd_index).indisready
+                && !(*relation.rd_index).indisexclusion
+        }
+    }
+
     pub fn is_unique(&self) -> bool {
         unsafe {
             !self.0.is_null() && !(*self.0).rd_index.is_null() && (*(*self.0).rd_index).indisunique
@@ -316,10 +339,12 @@ impl Rel {
     }
 
     /// Why an index cannot transfer as page images; `None` when it can.
-    /// Complements `is_btree`: every condition checked here fails that gate.
+    /// The sanity checks are shared by every physical access method (btree,
+    /// brin); the per-AM classification in `indexes` decides the rest, and
+    /// every other access method degrades here by name.
     pub fn non_physical_reason(&self) -> Option<String> {
         unsafe {
-            if !self.is_btree_am() {
+            if !self.is_btree_am() && !self.is_brin_am() {
                 return Some(format!(
                     "index access method {}",
                     access_method_name((*(*self.0).rd_rel).relam)
@@ -672,21 +697,23 @@ pub fn index_definition(oid: pg_sys::Oid) -> Result<String, String> {
 
 /// Opclass names inside replayed DDL resolve on the target by name, so a
 /// same-named custom opclass there can silently flip comparison semantics.
+/// Identity is proven by OID, never by namespace/name: initdb loads every
+/// core opclass below `FirstNormalObjectId` (16384), so any opclass at or
+/// above it is user- or extension-created — even one occupying a core name
+/// inside `pg_catalog`.
 pub fn ensure_no_custom_opclass(oid: pg_sys::Oid) -> Result<(), String> {
     let custom_opclass = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_index i \
          JOIN LATERAL unnest(i.indclass) AS u(oid) ON true \
          JOIN pg_opclass o ON o.oid = u.oid \
-         JOIN pg_namespace n ON n.oid = o.opcnamespace \
-         WHERE i.indexrelid = $1 AND n.nspname <> 'pg_catalog')",
+         WHERE i.indexrelid = $1 AND o.oid >= 16384)",
         &[oid.into()],
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "index opclass metadata is missing".to_owned())?;
     if custom_opclass {
         return Err(
-            "custom opclasses are not supported; only pg_catalog btree opclasses are allowed"
-                .into(),
+            "custom opclasses are not supported; only core pg_catalog opclasses are allowed".into(),
         );
     }
     Ok(())
