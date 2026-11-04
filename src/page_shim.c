@@ -555,10 +555,14 @@ pc_log_relation(Relation rel, ForkNumber fork)
      * BRIN revmap pages keep their entry array between pd_lower and
      * pd_upper, which standard-page full images omit as a hole; replayed
      * revmaps would silently read as unsummarized ranges, so every BRIN
-     * main-fork page is logged whole.
+     * main-fork page is logged whole. GIN is logged whole for the same
+     * fail-closed reason: a pre-9.4 posting page binary-upgraded into the
+     * file may carry a stale pd_lower, which core itself refuses to log
+     * as a standard page (ginvacuum.c).
      */
     bool        page_std = fork == MAIN_FORKNUM &&
-        rel->rd_rel->relam != BRIN_AM_OID;
+        rel->rd_rel->relam != BRIN_AM_OID &&
+        rel->rd_rel->relam != GIN_AM_OID;
 
     if (!smgrexists(smgr, fork))
         return;

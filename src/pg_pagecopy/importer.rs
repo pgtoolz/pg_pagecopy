@@ -450,7 +450,9 @@ impl ImportState {
                 .is_some_and(|entry| {
                     matches!(
                         entry,
-                        indexes::IndexTransfer::Brin(_) | indexes::IndexTransfer::Hash(_)
+                        indexes::IndexTransfer::Brin(_)
+                            | indexes::IndexTransfer::Hash(_)
+                            | indexes::IndexTransfer::Gin(_)
                     )
                 })
         {

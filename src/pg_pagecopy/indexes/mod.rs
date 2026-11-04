@@ -2,11 +2,13 @@
 //! degradation of source indexes, matching against target indexes, and the
 //! index entries of the manifest wire format. Transfer variants dispatch
 //! through exhaustive matches over [`wire::IndexTransfer`], never runtime
-//! registration; access-method specifics live in [`btree`] and [`brin`].
+//! registration; access-method specifics live in [`btree`], [`brin`],
+//! [`gin`] and [`hash`].
 
 mod brin;
 mod btree;
 mod catalog;
+mod gin;
 mod hash;
 pub mod wire;
 
@@ -17,5 +19,6 @@ pub use catalog::{
     toast_index_transfer, toast_index_verdict, verify_index_metapage, verify_toast_layout,
     ClassifyIndex,
 };
+pub use gin::GinMetadata;
 pub use hash::HashMetadata;
 pub use wire::IndexTransfer;
