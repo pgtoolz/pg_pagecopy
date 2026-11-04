@@ -304,6 +304,15 @@ impl Rel {
     }
 
     #[allow(clippy::cast_possible_wrap)]
+    pub fn is_hash_am(&self) -> bool {
+        unsafe {
+            let rel = &*(*self.0).rd_rel;
+            rel.relkind == pg_sys::RELKIND_INDEX as std::os::raw::c_char
+                && rel.relam == pg_sys::HASH_AM_OID
+        }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
     pub fn is_btree(&self) -> bool {
         unsafe {
             let relation = &*self.0;
@@ -332,6 +341,20 @@ impl Rel {
         }
     }
 
+    /// Same gate for hash: a real hash index that is valid, ready and not
+    /// part of an exclusion constraint.
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn is_hash(&self) -> bool {
+        unsafe {
+            let relation = &*self.0;
+            self.is_hash_am()
+                && !relation.rd_index.is_null()
+                && (*relation.rd_index).indisvalid
+                && (*relation.rd_index).indisready
+                && !(*relation.rd_index).indisexclusion
+        }
+    }
+
     pub fn is_unique(&self) -> bool {
         unsafe {
             !self.0.is_null() && !(*self.0).rd_index.is_null() && (*(*self.0).rd_index).indisunique
@@ -340,11 +363,11 @@ impl Rel {
 
     /// Why an index cannot transfer as page images; `None` when it can.
     /// The sanity checks are shared by every physical access method (btree,
-    /// brin); the per-AM classification in `indexes` decides the rest, and
-    /// every other access method degrades here by name.
+    /// brin, hash); the per-AM classification in `indexes` decides the rest,
+    /// and every other access method degrades here by name.
     pub fn non_physical_reason(&self) -> Option<String> {
         unsafe {
-            if !self.is_btree_am() && !self.is_brin_am() {
+            if !self.is_btree_am() && !self.is_brin_am() && !self.is_hash_am() {
                 return Some(format!(
                     "index access method {}",
                     access_method_name((*(*self.0).rd_rel).relam)

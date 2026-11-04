@@ -49,9 +49,10 @@ else
     image_tag=release
     matrix="$PG_VERSION-release"
   fi
-  build_extension "$PG_VERSION" "$target"
+  build_extension "$PG_VERSION" "$target" "$image_tag"
   docker build -f "$root/tests/bdd/Dockerfile" \
     --build-arg PG_VERSION="$PG_VERSION" \
+    --build-arg EXTENSION_TAG="$image_tag" \
     -t "pg-pagecopy-bdd-pg${PG_VERSION}:${image_tag}" "$root"
   image="pg-pagecopy-bdd-pg${PG_VERSION}:${image_tag}"
   features=/opt/pg-pagecopy-bdd/features

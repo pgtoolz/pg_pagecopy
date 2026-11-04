@@ -12,7 +12,7 @@ Feature: Unsupported secondary indexes survive as rebuildable definitions
         note text
       );
       CREATE INDEX events_note_btree ON public.events USING btree (note);
-      CREATE INDEX events_id_hash ON public.events USING hash (id);
+      CREATE INDEX events_id_hash ON public.events USING hash (payload);
       CREATE INDEX events_note_partial ON public.events (note) WHERE note IS NOT NULL;
       CREATE INDEX events_note_expr ON public.events (lower(note));
       INSERT INTO public.events VALUES
@@ -85,7 +85,7 @@ Feature: Unsupported secondary indexes survive as rebuildable definitions
       CREATE EXTENSION pg_pagecopy;
       CREATE TABLE public.events (id integer, note text);
       CREATE INDEX events_note_btree ON public.events USING btree (note) TABLESPACE attach_space;
-      CREATE INDEX events_id_hash ON public.events USING hash (id) TABLESPACE attach_space;
+      CREATE INDEX events_id_hash ON public.events USING hash (note) TABLESPACE attach_space;
       INSERT INTO public.events VALUES (1, 'one'), (2, 'two');
       """
     And the following SQL is executed on "target":
@@ -114,7 +114,7 @@ Feature: Unsupported secondary indexes survive as rebuildable definitions
       """
       CREATE EXTENSION pg_pagecopy;
       CREATE TABLE public.events (id integer, note text);
-      CREATE INDEX "hash USING suffix" ON public.events USING hash (id);
+      CREATE INDEX "hash USING suffix" ON public.events USING hash (note);
       CREATE INDEX "btree USING suffix" ON public.events USING btree (note);
       INSERT INTO public.events VALUES (1, 'one');
       """

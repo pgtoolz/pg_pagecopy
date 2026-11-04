@@ -170,7 +170,7 @@ Feature: Constraint-backed and invalid source indexes transfer as invalid defini
         RETURNS void AS 'pc_bdd_fixtures', 'pc_test_empty_index_state' LANGUAGE C STRICT;
       CREATE TABLE public.events (id integer, note text);
       CREATE INDEX events_valid ON public.events USING btree (id);
-      CREATE INDEX events_hash ON public.events USING hash (id);
+      CREATE INDEX events_hash ON public.events USING hash (note);
       CREATE UNIQUE INDEX events_key ON public.events USING btree (note);
       CREATE OPERATOR CLASS public.custom_text_ops FOR TYPE text USING btree AS
         OPERATOR 1 <, OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >,
@@ -191,7 +191,7 @@ Feature: Constraint-backed and invalid source indexes transfer as invalid defini
       """
       SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE name = 'public.events';
       """
-    And the following SQL on "source" returns "t|definition|index access method hash":
+    And the following SQL on "source" returns "t|definition|hash opclass pg_catalog.text_ops on text is not one of the core int2/int4/int8 pairs":
       """
       SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE name = 'events_hash';
       """

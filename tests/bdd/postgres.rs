@@ -221,11 +221,11 @@ impl PostgresPair {
     }
 
     /// Cancel a target statement only after the importer's test hook parks at
-    /// the BRIN-page milestone: heap, TOAST and at least one BRIN index page
-    /// are already installed, so the cancellation can no longer land during
+    /// the index-page milestone: heap, TOAST and at least one index page are
+    /// already installed, so the cancellation can no longer land during
     /// preparation or race a completed import.
-    pub async fn cancel_target_after_brin_milestone(&self, sql: &str) -> Result<(), String> {
-        cancel_execute(self.target.port, sql, CancelTrigger::BrinMilestone).await
+    pub async fn cancel_target_after_index_milestone(&self, sql: &str) -> Result<(), String> {
+        cancel_execute(self.target.port, sql, CancelTrigger::IndexMilestone).await
     }
 
     pub async fn change_target_owner_during_import(&self, sql: &str) -> Result<(), String> {
@@ -516,26 +516,26 @@ async fn connect(port: u16) -> Result<(Client, tokio::task::JoinHandle<()>), Str
 enum CancelTrigger {
     Delay(Duration),
     /// The importing backend published the test-hook milestone through
-    /// `pg_stat_activity`: the first BRIN page is installed and the import is
-    /// parked there waiting for this very cancellation.
-    BrinMilestone,
+    /// `pg_stat_activity`: the chosen index page is installed and the import
+    /// is parked there waiting for this very cancellation.
+    IndexMilestone,
 }
 
 async fn wait_for_cancel_trigger(port: u16, trigger: &CancelTrigger) {
     match trigger {
         CancelTrigger::Delay(delay) => tokio::time::sleep(*delay).await,
-        CancelTrigger::BrinMilestone => {
+        CancelTrigger::IndexMilestone => {
             let (client, task) = connect(port).await.expect("milestone poll connect failed");
             let deadline = std::time::Instant::now() + Duration::from_secs(180);
             loop {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "import never published the BRIN-page hold milestone"
+                    "import never published the index-page hold milestone"
                 );
                 let seen = client
                     .simple_query(
                         "SELECT count(*)::text FROM pg_stat_activity \
-                         WHERE application_name = 'pg_pagecopy brin hold'",
+                         WHERE application_name = 'pg_pagecopy index hold'",
                     )
                     .await;
                 if let Ok(messages) = seen {

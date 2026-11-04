@@ -9,7 +9,7 @@ Feature: Non-btree indexes degrade and rebuild across major versions
       CREATE TABLE public.events (
         id integer PRIMARY KEY, tags integer[], loc point, payload text
       );
-      CREATE INDEX events_hash ON public.events USING hash (id);
+      CREATE INDEX events_hash ON public.events USING hash (payload);
       CREATE INDEX events_gin ON public.events USING gin (tags);
       CREATE INDEX events_gist ON public.events USING gist (loc);
       CREATE INDEX events_brin ON public.events USING brin (payload);

@@ -418,7 +418,7 @@ Feature: Transfer validation and failure isolation
   Scenario: Unsupported existing target index is disabled and can be rebuilt
     When the following SQL is executed on "source":
       """
-      CREATE INDEX events_id_hash ON public.events USING hash (id);
+      CREATE INDEX events_id_hash ON public.events USING hash (payload);
       INSERT INTO public.events VALUES (1, 'new', 'one'), (2, 'new', 'two');
       """
     And the following SQL is executed on "target":
@@ -428,7 +428,7 @@ Feature: Transfer validation and failure isolation
         payload text,
         note text
       );
-      CREATE INDEX events_id_hash ON public.events USING hash (id);
+      CREATE INDEX events_id_hash ON public.events USING hash (payload);
       INSERT INTO public.events VALUES (42, 'keep', 'old');
       """
     When the following SQL is executed on "target":

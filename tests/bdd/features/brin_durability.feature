@@ -128,9 +128,9 @@ FROM public.t;
       CREATE INDEX t_b ON public.t USING brin (id) WITH (pages_per_range = 4);
       INSERT INTO public.t VALUES (9999, 999999, 'sentinel');
       """
-    When the following SQL on "target" is cancelled after the BRIN page milestone:
+    When the following SQL on "target" is cancelled after the index page milestone:
       """
-      SET pagecopy.debug_hold_brin_page_block = 1;
+      SET pagecopy.debug_hold_index_page_block = 1;
       SELECT pagecopy.pull(
         'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
         'public.t', 'public.t', true
