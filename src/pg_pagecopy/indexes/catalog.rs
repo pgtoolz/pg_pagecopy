@@ -1,11 +1,15 @@
 //! Index classification, degradation and target matching shared by every
-//! transfer path. Catalog identity reads (definition, shape, opclass and
-//! metapage metadata) come from `ffi`; this module owns the policy: which
-//! index transfers as page images, which degrades to its definition, and how
-//! each manifest index is matched and installed on the target.
+//! transfer path. Catalog identity reads (definition, shape, opclass) come
+//! from `ffi` and btree physicals from [`btree`]; this module owns the
+//! policy: which index transfers as page images, which degrades to its
+//! definition, how each manifest index is matched and installed on the
+//! target, and how incoming index pages are verified against their manifest
+//! entries.
 
 use super::super::ffi::{self, Rel};
-use super::wire::{BtreeMetadata, IndexTransfer};
+use super::btree;
+use super::wire::IndexTransfer;
+use super::BtreeMetadata;
 use pgrx::pg_sys;
 
 /// How one source index crosses to the target. The metadata callback selects
@@ -48,6 +52,31 @@ pub unsafe fn classify_index_with<T>(
     }
 }
 
+/// Classify one opened source index for transfer, reading the full physical
+/// metadata of indexes that move as page images; the access method is
+/// selected here, never at the call sites.
+///
+/// # Safety
+/// Reads the source catalog; runs inside PostgreSQL.
+pub unsafe fn classify_index(index: &Rel) -> Result<ClassifyIndex<BtreeMetadata>, String> {
+    classify_index_with(index, btree::metadata)
+}
+
+/// Manifest entry for a classified source index: physical classifications
+/// transfer as page images, everything else degrades to its definition.
+impl From<ClassifyIndex<BtreeMetadata>> for IndexTransfer {
+    fn from(classified: ClassifyIndex<BtreeMetadata>) -> Self {
+        match classified {
+            ClassifyIndex::Physical(metadata) => IndexTransfer::Btree(metadata),
+            ClassifyIndex::Invalid {
+                definition,
+                unique,
+                reason: _,
+            } => IndexTransfer::Invalid { definition, unique },
+        }
+    }
+}
+
 /// Shared verdict for a source TOAST index: unlike user indexes it can
 /// never degrade to a definition, so a non-btree is a hard error and the
 /// metadata callback decides the rest. `pagecopy.check` reports the same
@@ -66,16 +95,41 @@ pub unsafe fn toast_index_verdict<T>(
     metadata(toast_index_oid)
 }
 
-/// The target TOAST index must match the source physical layout exactly;
-/// unlike user indexes it can never degrade to a definition.
-pub fn toast_layout(expected: &BtreeMetadata, target: &Rel) -> Result<(), String> {
-    let actual = ffi::index_metadata(target.oid())?;
-    if !actual.has_same_physical_layout(expected) {
-        return Err(format!(
-            "source and target TOAST btree metadata differ: source={expected:?}, target={actual:?}"
-        ));
+/// Manifest entry of the source TOAST index: unlike user indexes it can
+/// never degrade, so it always transfers as physical pages of a supported
+/// btree.
+///
+/// # Safety
+/// Opens the index under `AccessShareLock` until the statement ends.
+pub unsafe fn toast_index_transfer(toast_index_oid: pg_sys::Oid) -> Result<IndexTransfer, String> {
+    toast_index_verdict(toast_index_oid, btree::metadata).map(IndexTransfer::Btree)
+}
+
+/// The target TOAST index must match the manifest entry physically; the
+/// dispatch is exhaustive and a degraded (`Invalid`) entry is an error.
+pub fn verify_toast_layout(entry: &IndexTransfer, target: &Rel) -> Result<(), String> {
+    match entry {
+        IndexTransfer::Btree(expected) => btree::toast_layout(expected, target),
+        IndexTransfer::Invalid { .. } => Err("source TOAST index is not physical".into()),
     }
-    Ok(())
+}
+
+/// Manifest entry of the n-th physically transferred index in stream order;
+/// `Invalid` entries are never streamed, so this counts physical entries.
+pub fn physical_index(indexes: &[IndexTransfer], ordinal: usize) -> Option<&IndexTransfer> {
+    indexes
+        .iter()
+        .filter(|entry| matches!(entry, IndexTransfer::Btree(_)))
+        .nth(ordinal)
+}
+
+/// Verify the first page of a physically transferred index against its
+/// manifest entry; entries that never stream fail closed.
+pub fn verify_index_metapage(entry: &IndexTransfer, page: &mut [u8]) -> bool {
+    match entry {
+        IndexTransfer::Btree(metadata) => btree::verify_metapage(page, metadata.all_equal_image),
+        IndexTransfer::Invalid { .. } => false,
+    }
 }
 
 /// Match every manifest user index to one target index and dispatch on the
@@ -89,11 +143,9 @@ pub fn match_user_indexes(
     let mut physical = Vec::with_capacity(source_indexes.len());
     for source_index in source_indexes {
         let position = match source_index {
-            IndexTransfer::Btree(expected) => target_indexes.iter().position(|(_, index)| {
-                index.is_btree()
-                    && ffi::index_metadata(index.oid())
-                        .is_ok_and(|actual| actual.has_same_physical_layout(expected))
-            }),
+            IndexTransfer::Btree(expected) => target_indexes
+                .iter()
+                .position(|(_, index)| btree::matches_layout(expected, index)),
             IndexTransfer::Invalid { definition, unique } => target_indexes
                 .iter()
                 .position(|(candidate, index)| {

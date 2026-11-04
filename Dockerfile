@@ -30,6 +30,7 @@ COPY Cargo.toml Cargo.lock build.rs pg_pagecopy.control ./
 RUN mkdir -p src \
     && echo '' > src/lib.rs \
     && echo '' > src/page_shim.c \
+    && echo '' > src/index_btree.c \
     && cargo fetch --locked \
     && cargo build --locked --no-default-features --features "pg${PG_VERSION} test-hooks" \
     && cargo clippy --locked --no-default-features --features "pg${PG_VERSION} test-hooks" -- -D warnings -D clippy::pedantic \
@@ -37,9 +38,9 @@ RUN mkdir -p src \
 
 FROM toolchain AS build
 COPY src ./src
-# COPY preserves mtimes; touch the real C source so cc does not reuse the
-# empty stub's newer object file from the dependency-prebuild layer.
-RUN touch src/page_shim.c \
+# COPY preserves mtimes; touch the real C sources so cc does not reuse the
+# empty stubs' newer object files from the dependency-prebuild layer.
+RUN touch src/page_shim.c src/index_btree.c \
     && cargo fmt --all -- --check \
     && cargo test --locked --no-default-features --features "pg${PG_VERSION} test-hooks" \
     && cargo clippy --locked --all-targets --no-default-features --features "pg${PG_VERSION} test-hooks" -- -D warnings -D clippy::pedantic

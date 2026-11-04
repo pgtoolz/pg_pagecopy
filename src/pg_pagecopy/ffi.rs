@@ -1,4 +1,3 @@
-use super::indexes::BtreeMetadata;
 use super::wire;
 use pgrx::{pg_sys, spi::Spi};
 use std::ffi::CStr;
@@ -84,14 +83,6 @@ pub struct RawAttribute {
     pub dropped: bool,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct RawBtreeMetadata {
-    version: u32,
-    all_equal_image: bool,
-    expected_all_equal_image: bool,
-}
-
 unsafe extern "C" {
     fn pc_resolve_relation(name: *const c_char) -> pg_sys::Oid;
     fn pc_target_owner(oid: pg_sys::Oid) -> bool;
@@ -122,8 +113,6 @@ unsafe extern "C" {
         checksums: bool,
         keep_xids: bool,
     );
-    fn pc_verify_btree_metapage(page: *mut c_char, all_equal_image: bool) -> bool;
-    fn pc_btree_metadata(rel: pg_sys::Relation, metadata: *mut RawBtreeMetadata);
     fn pc_max_toast_chunk_size() -> c_int;
     fn pc_max_identifier_length() -> c_int;
     fn pc_checksum_algorithm_version() -> c_int;
@@ -193,6 +182,11 @@ impl Rel {
     /// Opens a relation and retains its lock until transaction end on Drop.
     pub unsafe fn open(oid: pg_sys::Oid, lock: pg_sys::LOCKMODE) -> Self {
         Self(pg_sys::relation_open(oid, lock), oid)
+    }
+
+    /// Raw relation handle for the access-method FFI in `indexes::btree`.
+    pub(super) fn raw(&self) -> pg_sys::Relation {
+        self.0
     }
 
     pub fn oid(&self) -> pg_sys::Oid {
@@ -521,11 +515,6 @@ impl Rel {
         unsafe { guard(|| pc_verify_page(page.as_mut_ptr().cast(), block, checksums)) }
     }
 
-    pub fn verify_btree_metapage(page: &mut [u8], all_equal_image: bool) -> bool {
-        assert_eq!(page.len(), PAGE_SIZE);
-        unsafe { guard(|| pc_verify_btree_metapage(page.as_mut_ptr().cast(), all_equal_image)) }
-    }
-
     pub fn heap_page_is_frozen(page: &[u8]) -> bool {
         assert_eq!(page.len(), PAGE_SIZE);
         unsafe { guard(|| pc_heap_page_is_frozen(page.as_ptr().cast())) }
@@ -781,20 +770,6 @@ pub fn index_catalog_metadata(oid: pg_sys::Oid) -> Result<(String, String), Stri
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "index catalog metadata is missing".to_owned())?;
     Ok((index_definition(oid)?, shape))
-}
-
-pub fn index_metadata(oid: pg_sys::Oid) -> Result<BtreeMetadata, String> {
-    let (definition, shape) = index_catalog_metadata(oid)?;
-    let rel = unsafe { Rel::open(oid, pg_sys::ShareLock.cast_signed()) };
-    let mut raw = RawBtreeMetadata::default();
-    unsafe { guard(|| pc_btree_metadata(rel.0, &raw mut raw)) };
-    Ok(BtreeMetadata {
-        definition,
-        shape,
-        btree_version: raw.version,
-        all_equal_image: raw.all_equal_image,
-        expected_all_equal_image: raw.expected_all_equal_image,
-    })
 }
 
 pub fn max_toast_chunk_size() -> i32 {

@@ -1,5 +1,5 @@
 use super::ffi::{self, Rel, MAIN_FORK};
-use super::indexes::{self, IndexTransfer};
+use super::indexes;
 use super::source_client::SourceClient;
 use super::wire::{self, Manifest, RelationKind, TableSchema};
 use pgrx::pg_sys;
@@ -245,10 +245,7 @@ fn prepare_state(
         let target = target_toast_index
             .as_ref()
             .ok_or_else(|| "missing target TOAST index".to_owned())?;
-        let IndexTransfer::Btree(expected) = &manifest.indexes[0] else {
-            return Err("source TOAST index is not physical".into());
-        };
-        indexes::toast_layout(expected, target)?;
+        indexes::verify_toast_layout(&manifest.indexes[0], target)?;
     }
 
     let mut targets = Vec::with_capacity(manifest.relations.len());
@@ -364,17 +361,9 @@ impl ImportState {
                 .count()
                 .checked_sub(1)
                 .ok_or_else(|| "btree metadata ordinal underflow".to_owned())?;
-            let expected = self
-                .manifest
-                .indexes
-                .iter()
-                .filter_map(|index| match index {
-                    IndexTransfer::Btree(metadata) => Some(metadata),
-                    IndexTransfer::Invalid { .. } => None,
-                })
-                .nth(ordinal)
+            let entry = indexes::physical_index(&self.manifest.indexes, ordinal)
                 .ok_or_else(|| "missing btree metadata in manifest".to_owned())?;
-            if !Rel::verify_btree_metapage(&mut packet.bytes, expected.all_equal_image) {
+            if !indexes::verify_index_metapage(entry, &mut packet.bytes) {
                 return Err(format!(
                     "btree metapage verification failed for relation {relation_index}"
                 ));

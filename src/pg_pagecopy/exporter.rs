@@ -1,5 +1,7 @@
 use super::ffi::{self, Rel, FSM_FORK, MAIN_FORK, PAGE_SIZE, VM_FORK};
-use super::indexes::{classify_index_with, toast_index_verdict, ClassifyIndex, IndexTransfer};
+use super::indexes::{
+    classify_index, classify_index_with, toast_index_transfer, toast_index_verdict, ClassifyIndex,
+};
 use super::wire::{self, Manifest, Relation, RelationKind, SchemaColumn, SchemaIndex, TableSchema};
 use pgrx::iter::SetOfIterator;
 use pgrx::pg_sys;
@@ -291,25 +293,16 @@ pub unsafe fn build_manifest(
             &toast_index,
             RelationKind::Index,
         );
-        indexes.push(IndexTransfer::Btree(toast_index_verdict(
-            toast_index_oid,
-            ffi::index_metadata,
-        )?));
+        indexes.push(toast_index_transfer(toast_index_oid)?);
     }
 
     for index_oid in source.index_oids() {
         let index = Rel::open(index_oid, pg_sys::ShareLock.cast_signed());
-        match classify_index_with(&index, ffi::index_metadata)? {
-            ClassifyIndex::Physical(metadata) => {
-                push_relation(&mut relations, index_oid, &index, RelationKind::Index);
-                indexes.push(IndexTransfer::Btree(metadata));
-            }
-            ClassifyIndex::Invalid {
-                definition, unique, ..
-            } => {
-                indexes.push(IndexTransfer::Invalid { definition, unique });
-            }
+        let classified = classify_index(&index)?;
+        if matches!(classified, ClassifyIndex::Physical(_)) {
+            push_relation(&mut relations, index_oid, &index, RelationKind::Index);
         }
+        indexes.push(classified.into());
     }
 
     let source_horizons = pg_class_horizons(source_oid)?;

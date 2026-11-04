@@ -5,24 +5,7 @@
 //! are part of the format and never renumbered.
 
 use super::super::wire::{put_string, put_u32, Decoder, Result, WireError};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BtreeMetadata {
-    pub definition: String,
-    pub shape: String,
-    pub btree_version: u32,
-    pub all_equal_image: bool,
-    pub expected_all_equal_image: bool,
-}
-
-impl BtreeMetadata {
-    pub fn has_same_physical_layout(&self, other: &Self) -> bool {
-        // Dedup flags belong to the source metapage; newer majors can read older non-dedup pages.
-        self.definition == other.definition
-            && self.shape == other.shape
-            && self.btree_version == other.btree_version
-    }
-}
+use super::btree::BtreeMetadata;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IndexTransfer {
@@ -85,25 +68,6 @@ mod tests {
             all_equal_image: true,
             expected_all_equal_image: true,
         }
-    }
-
-    #[test]
-    fn btree_layout_allows_dedup_flag_changes_across_majors() {
-        let source = BtreeMetadata {
-            definition: "btree (chunk_id, chunk_seq)".into(),
-            shape: "2|2|t|f|1 2|0 0|pg_catalog.oid_ops,pg_catalog.int4_ops|".into(),
-            btree_version: 4,
-            all_equal_image: false,
-            expected_all_equal_image: false,
-        };
-        let mut target = BtreeMetadata {
-            all_equal_image: true,
-            expected_all_equal_image: true,
-            ..source.clone()
-        };
-        assert!(source.has_same_physical_layout(&target));
-        target.btree_version = 3;
-        assert!(!source.has_same_physical_layout(&target));
     }
 
     #[test]
