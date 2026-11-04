@@ -49,9 +49,10 @@ else
     image_tag=release
     matrix="$PG_VERSION-release"
   fi
-  build_extension "$PG_VERSION" "$target"
+  build_extension "$PG_VERSION" "$target" "$image_tag"
   docker build -f "$root/tests/bdd/Dockerfile" \
     --build-arg PG_VERSION="$PG_VERSION" \
+    --build-arg EXTENSION_TAG="$image_tag" \
     -t "pg-pagecopy-bdd-pg${PG_VERSION}:${image_tag}" "$root"
   image="pg-pagecopy-bdd-pg${PG_VERSION}:${image_tag}"
   features=/opt/pg-pagecopy-bdd/features
@@ -63,6 +64,7 @@ output=$(mktemp)
 trap 'rm -f "$output"' EXIT HUP INT TERM
 if docker run --rm -e PG_PAGECOPY_LOG_DIR=/logs \
   -e "PG_PAGECOPY_FEATURES=${PG_PAGECOPY_FEATURES:-$features}" \
+  -e "PG_PAGECOPY_TAGS=${PG_PAGECOPY_TAGS:-}" \
   -v "$log_dir:/logs" "$image" >"$output" 2>&1; then
   status=0
 else
@@ -70,6 +72,10 @@ else
 fi
 cat "$output"
 [ "$status" -eq 0 ] || exit "$status"
+if [ -n "${PG_PAGECOPY_TAGS:-}" ]; then
+  echo "tag selection '${PG_PAGECOPY_TAGS}' active; ignoring skipped scenarios" >&2
+  exit 0
+fi
 if grep -Eq '[1-9][0-9]* skipped' "$output"; then
   echo 'BDD scenarios were skipped; treat the run as failed' >&2
   exit 1

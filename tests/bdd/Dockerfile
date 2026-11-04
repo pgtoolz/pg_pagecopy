@@ -1,4 +1,5 @@
 ARG PG_VERSION=17
+ARG EXTENSION_TAG=dev
 
 FROM rust:1.99-bookworm AS build
 RUN rustup component add clippy
@@ -26,7 +27,7 @@ RUN cc -shared -fPIC -Wall -Werror \
     -I"$(/usr/lib/postgresql/${PG_VERSION}/bin/pg_config --includedir-server)" \
     /tmp/fixtures.c -o /tmp/pc_bdd_fixtures.so
 
-FROM pg-pagecopy-pg${PG_VERSION}:dev
+FROM pg-pagecopy-pg${PG_VERSION}:${EXTENSION_TAG}
 ARG PG_VERSION
 COPY --from=fixtures /tmp/pc_bdd_fixtures.so /usr/lib/postgresql/${PG_VERSION}/lib/
 ENV PATH="/usr/lib/postgresql/${PG_VERSION}/bin:${PATH}" \

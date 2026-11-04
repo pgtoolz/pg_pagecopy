@@ -23,6 +23,21 @@ const PAGE_HEADER_UNSTABLE_LEN: usize = 10;
 /// `BRIN_PAGETYPE_REGULAR`, the summary pages, stored little-endian in the
 /// last halfword.
 const BRIN_PAGETYPE_REGULAR: u16 = 0xF093;
+/// `MAXALIGN(sizeof(HashPageOpaqueData))`: every hash page ends with this
+/// 16-byte special space on the supported ABIs.
+const HASH_SPECIAL_SIZE: usize = 16;
+/// `HASHO_PAGE_ID`, stored little-endian in the page's final halfword.
+const HASHO_PAGE_ID: u16 = 0xFF80;
+/// `LH_PAGE_TYPE` masks the page-type bits of `hasho_flag`.
+const HASH_PAGE_TYPE_MASK: u16 = 0x000F;
+/// `LH_BUCKET_PAGE`.
+const LH_BUCKET_PAGE: u16 = 0x0002;
+/// `LH_OVERFLOW_PAGE`.
+const LH_OVERFLOW_PAGE: u16 = 0x0001;
+/// `LH_BITMAP_PAGE`.
+const LH_BITMAP_PAGE: u16 = 0x0004;
+/// `LH_META_PAGE`.
+const LH_META_PAGE: u16 = 0x0008;
 
 /// Whether a block is a revmap page whose TID array carries entries: the
 /// BRIN revmap page type is present and some TID byte outside the special
@@ -46,6 +61,37 @@ fn brin_summary_carries_tuples(page: &[u8]) -> bool {
     let page_type = u16::from_le_bytes([page[type_offset], page[type_offset + 1]]);
     let lower = u16::from_le_bytes([page[12], page[13]]) as usize;
     page_type == BRIN_PAGETYPE_REGULAR && lower > REVMAP_TID_START
+}
+
+/// A hash page's `hasho_flag` field, little-endian, in the special space.
+fn hash_page_flag(page: &[u8]) -> u16 {
+    assert_eq!(page.len(), BLOCK_SIZE);
+    let offset = BLOCK_SIZE - HASH_SPECIAL_SIZE + 12;
+    u16::from_le_bytes([page[offset], page[offset + 1]])
+}
+
+/// Whether a block is a hash page of the given `LH_PAGE_TYPE` kind with the
+/// HASH page id set, so the special space really is a `HashPageOpaqueData`.
+fn is_hash_page_type(page: &[u8], page_type: u16) -> bool {
+    let id_offset = BLOCK_SIZE - 2;
+    let page_id = u16::from_le_bytes([page[id_offset], page[id_offset + 1]]);
+    page_id == HASHO_PAGE_ID && (hash_page_flag(page) & HASH_PAGE_TYPE_MASK) == page_type
+}
+
+/// Whether a block is a populated hash bucket or overflow page: the right
+/// page type is present and the line pointer array has started past the
+/// page header (`pd_lower`), so at least one index tuple is stored.
+fn hash_page_carries_tuples(page: &[u8], page_type: u16) -> bool {
+    let lower = u16::from_le_bytes([page[12], page[13]]) as usize;
+    is_hash_page_type(page, page_type) && lower > 24
+}
+
+/// Whether a block is entirely zero: hash bucket allocation reserves whole
+/// allocation phases up front and initializes only each batch's final page,
+/// so a valid hash index legitimately contains all-zero sparse blocks.
+fn hash_page_is_all_zero(page: &[u8]) -> bool {
+    assert_eq!(page.len(), BLOCK_SIZE);
+    page.iter().all(|byte| *byte == 0)
 }
 
 #[given("a fresh PostgreSQL pair")]
@@ -459,11 +505,11 @@ async fn cancel_target_import_after(world: &mut AttachWorld, delay: u64, step: &
         .unwrap_or_else(|error| panic!("target cancellation failed: {error}"));
 }
 
-#[when(expr = "the following SQL on \"target\" is cancelled after the BRIN page milestone:")]
-async fn cancel_target_import_after_brin_milestone(world: &mut AttachWorld, step: &Step) {
+#[when(expr = "the following SQL on \"target\" is cancelled after the index page milestone:")]
+async fn cancel_target_import_after_index_milestone(world: &mut AttachWorld, step: &Step) {
     let sql = world.expand_sql(docstring(step));
     let pair = world.pair.as_ref().expect("PostgreSQL pair is not running");
-    pair.cancel_target_after_brin_milestone(&sql)
+    pair.cancel_target_after_index_milestone(&sql)
         .await
         .unwrap_or_else(|error| panic!("target cancellation failed: {error}"));
 }
@@ -571,7 +617,7 @@ async fn record_target_block_checked(
     let recorded = bytes[start..start + BLOCK_SIZE].to_vec();
     assert!(
         check(&recorded),
-        "recorded block {block} of {relation} is not a populated brin {kind} page; \
+        "recorded block {block} of {relation} is not a populated index {kind} page; \
          the fixture is too small",
     );
     world.recorded_data_file = Some(path);
@@ -596,6 +642,24 @@ async fn record_target_brin_page(
         "revmap" => revmap_carries_entries,
         "summary" => brin_summary_carries_tuples,
         _ => panic!("brin page kind must be revmap or summary, not {kind:?}"),
+    };
+    record_target_block_checked(world, relation, block, check, &kind).await;
+}
+
+#[when(expr = "target relation {string} block {int} is recorded as a hash {string} page")]
+async fn record_target_hash_page(
+    world: &mut AttachWorld,
+    relation: String,
+    block: u64,
+    kind: String,
+) {
+    let check = match kind.as_str() {
+        "meta" => |page: &[u8]| is_hash_page_type(page, LH_META_PAGE),
+        "bucket" => |page: &[u8]| hash_page_carries_tuples(page, LH_BUCKET_PAGE),
+        "overflow" => |page: &[u8]| hash_page_carries_tuples(page, LH_OVERFLOW_PAGE),
+        "bitmap" => |page: &[u8]| is_hash_page_type(page, LH_BITMAP_PAGE),
+        "all-zero" => hash_page_is_all_zero,
+        _ => panic!("hash page kind must be meta, bucket, overflow, bitmap or all-zero, not {kind:?}"),
     };
     record_target_block_checked(world, relation, block, check, &kind).await;
 }
@@ -626,6 +690,59 @@ fn recorded_block_survives_recovery(world: &mut AttachWorld) {
             &expected[PAGE_HEADER_UNSTABLE_LEN..],
             "crash recovery restored different bytes for block {block}; \
              revmap or summary contents were lost"
+        );
+    }
+}
+
+/// Replay of a standard-page full-page image preserves every byte outside
+/// `[pd_lower, pd_upper)` but always zero-fills the hole itself, and stamps
+/// the page LSN/checksum in the first 16 bytes; an all-zero page is never
+/// stamped (`PageIsNew` guard) and must recover fully zero.
+#[then("the recorded target block is unchanged after crash recovery except the WAL hole")]
+fn recorded_block_survives_recovery_excluding_hole(world: &mut AttachWorld) {
+    let path = world
+        .recorded_data_file
+        .clone()
+        .expect("no recorded target data file");
+    let recorded = std::mem::take(&mut world.recorded_relation_blocks);
+    assert!(
+        !recorded.is_empty(),
+        "no recorded target blocks to compare after recovery"
+    );
+    assert!(
+        path.exists(),
+        "recorded data file {} was not rebuilt by WAL recovery",
+        path.display()
+    );
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    for (block, expected) in recorded {
+        let start = usize::try_from(block).expect("block number fits usize") * BLOCK_SIZE;
+        let recovered = &bytes[start..start + BLOCK_SIZE];
+        if hash_page_is_all_zero(&expected) {
+            // Replay never stamps an uninitialized page (PageIsNew guard),
+            // so a reserved all-zero block must recover fully zero.
+            assert!(
+                recovered.iter().all(|byte| *byte == 0),
+                "crash recovery changed originally all-zero block {block}"
+            );
+            continue;
+        }
+        let lower = u16::from_le_bytes([expected[12], expected[13]]) as usize;
+        let upper = u16::from_le_bytes([expected[14], expected[15]]) as usize;
+        assert_eq!(
+            &recovered[PAGE_HEADER_UNSTABLE_LEN..lower],
+            &expected[PAGE_HEADER_UNSTABLE_LEN..lower],
+            "crash recovery lost page data below the WAL hole for block {block}"
+        );
+        assert!(
+            recovered[lower..upper].iter().all(|byte| *byte == 0),
+            "crash recovery left nonzero bytes in the WAL hole of block {block}"
+        );
+        assert_eq!(
+            &recovered[upper..],
+            &expected[upper..],
+            "crash recovery restored different bytes for block {block} above the WAL hole"
         );
     }
 }
@@ -709,6 +826,49 @@ mod tests {
         assert!(!super::brin_summary_carries_tuples(&revmap_page(
             BRIN_PAGETYPE_REVMAP,
             1
+        )));
+    }
+
+    fn hash_page(page_type: u16, lower: u16) -> [u8; BLOCK_SIZE] {
+        let mut page = [0u8; BLOCK_SIZE];
+        let id_offset = BLOCK_SIZE - 2;
+        page[id_offset..id_offset + 2].copy_from_slice(&super::HASHO_PAGE_ID.to_le_bytes());
+        let flag_offset = BLOCK_SIZE - super::HASH_SPECIAL_SIZE + 12;
+        page[flag_offset..flag_offset + 2].copy_from_slice(&page_type.to_le_bytes());
+        page[12..14].copy_from_slice(&lower.to_le_bytes());
+        page
+    }
+
+    #[test]
+    fn a_hash_bucket_page_is_recognized_only_with_the_page_id_and_tuples() {
+        // Self-check for the sparse-page crash scenarios: only the right
+        // page id plus type plus stored tuples make a bucket page qualify.
+        assert!(super::hash_page_carries_tuples(
+            &hash_page(super::LH_BUCKET_PAGE, 32),
+            super::LH_BUCKET_PAGE
+        ));
+        assert!(!super::hash_page_carries_tuples(
+            &hash_page(super::LH_BUCKET_PAGE, 24),
+            super::LH_BUCKET_PAGE
+        ));
+        assert!(!super::hash_page_carries_tuples(
+            &hash_page(super::LH_BITMAP_PAGE, 32),
+            super::LH_BUCKET_PAGE
+        ));
+        let mut wrong_id = hash_page(super::LH_BUCKET_PAGE, 32);
+        wrong_id[BLOCK_SIZE - 2] = 0;
+        assert!(!super::hash_page_carries_tuples(
+            &wrong_id,
+            super::LH_BUCKET_PAGE
+        ));
+        assert!(!super::hash_page_carries_tuples(
+            &[0u8; BLOCK_SIZE],
+            super::LH_BUCKET_PAGE
+        ));
+        assert!(super::hash_page_is_all_zero(&[0u8; BLOCK_SIZE]));
+        assert!(!super::hash_page_is_all_zero(&hash_page(
+            super::LH_BUCKET_PAGE,
+            32
         )));
     }
 }

@@ -375,8 +375,8 @@ impl ImportState {
                     0xFF;
             }
         }
-        // Only main-fork pages carry data checksums; VM and FSM pages transfer
-        // byte-exact without verification.
+        // Only main-fork pages get full layout verification; VM and FSM
+        // pages arrive pre-stamped by the exporter (LSN reset, checksum).
         if fork == MAIN_FORK
             && !Rel::verify_page(
                 packet.block,
@@ -432,7 +432,7 @@ impl ImportState {
         self.targets[target_index].write_page(fork, packet.block, &packet.bytes);
         self.next_blocks[relation_index] += 1;
         // Debug-only BDD milestone: park the import immediately after this
-        // BRIN page is installed, so the suite can cancel from a
+        // index page is installed, so the suite can cancel from a
         // deterministic post-index phase instead of a timer. Publishing the
         // marker through pg_stat_activity makes the park observable from
         // another session; the loop exits when the cancel lands and the next
@@ -441,17 +441,22 @@ impl ImportState {
         #[cfg(feature = "test-hooks")]
         if fork == MAIN_FORK
             && metadata.kind == RelationKind::Index
-            && crate::DEBUG_HOLD_BRIN_PAGE_BLOCK.get() >= 0
+            && crate::DEBUG_HOLD_INDEX_PAGE_BLOCK.get() >= 0
             && packet.block
-                == u32::try_from(crate::DEBUG_HOLD_BRIN_PAGE_BLOCK.get()).unwrap_or(u32::MAX)
+                == u32::try_from(crate::DEBUG_HOLD_INDEX_PAGE_BLOCK.get()).unwrap_or(u32::MAX)
             && self
                 .index_ordinal(relation_index, metadata.fork)
                 .and_then(|ordinal| indexes::physical_index(&self.manifest.indexes, ordinal))
-                .is_some_and(|entry| matches!(entry, indexes::IndexTransfer::Brin(_)))
+                .is_some_and(|entry| {
+                    matches!(
+                        entry,
+                        indexes::IndexTransfer::Brin(_) | indexes::IndexTransfer::Hash(_)
+                    )
+                })
         {
             let _ = Spi::get_one_with_args::<String>(
-                "SELECT set_config('application_name', 'pg_pagecopy brin hold', false)",
-                &["pg_pagecopy brin hold".into()],
+                "SELECT set_config('application_name', 'pg_pagecopy index hold', false)",
+                &["pg_pagecopy index hold".into()],
             );
             for _ in 0..3000 {
                 let cancel_pending = unsafe {

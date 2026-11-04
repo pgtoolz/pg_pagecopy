@@ -34,11 +34,11 @@ static DEBUG_DROP_INDEX_PAGE_RELATION: GucSetting<i32> = GucSetting::<i32>::new(
 #[cfg(feature = "test-hooks")]
 static DEBUG_DROP_INDEX_PAGE_BLOCK: GucSetting<i32> = GucSetting::<i32>::new(-1);
 /// Debug-only: when >= 0, the importer parks right after installing this
-/// block of a physically transferred BRIN index until the statement is
+/// block of a physically transferred index until the statement is
 /// cancelled, so the BDD suite cancels from a deterministic post-index
 /// phase. -1 disables.
 #[cfg(feature = "test-hooks")]
-static DEBUG_HOLD_BRIN_PAGE_BLOCK: GucSetting<i32> = GucSetting::<i32>::new(-1);
+static DEBUG_HOLD_INDEX_PAGE_BLOCK: GucSetting<i32> = GucSetting::<i32>::new(-1);
 #[cfg(feature = "test-hooks")]
 static DEBUG_DISABLE_LZ4: GucSetting<bool> = GucSetting::<bool>::new(false);
 /// Progress cadence in pages: 0 disables both `NOTICE`s and `application_name`
@@ -126,11 +126,11 @@ pub extern "C-unwind" fn _PG_init() {
             GucFlags::default(),
         );
         GucRegistry::define_int_guc(
-            c"pagecopy.debug_hold_brin_page_block",
-            c"BRIN block to hold the import at (debug)",
+            c"pagecopy.debug_hold_index_page_block",
+            c"Index block to hold the import at (debug)",
             c"Parks the import after installing this block of a physically \
-             transferred BRIN index until the statement is cancelled. -1 disables.",
-            &DEBUG_HOLD_BRIN_PAGE_BLOCK,
+             transferred index until the statement is cancelled. -1 disables.",
+            &DEBUG_HOLD_INDEX_PAGE_BLOCK,
             -1,
             i32::MAX,
             GucContext::Suset,

@@ -7,6 +7,7 @@
 mod brin;
 mod btree;
 mod catalog;
+mod hash;
 pub mod wire;
 
 pub use brin::BrinMetadata;
@@ -16,4 +17,5 @@ pub use catalog::{
     toast_index_transfer, toast_index_verdict, verify_index_metapage, verify_toast_layout,
     ClassifyIndex,
 };
+pub use hash::HashMetadata;
 pub use wire::IndexTransfer;

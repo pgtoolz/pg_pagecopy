@@ -229,6 +229,18 @@ and runs two postmasters in one container. Scenarios cover TOAST, btree,
 overwrite, auto-creation, validation, rollback and cross-major transfers,
 verified with `verify_heapam` and `bt_index_check(..., heapallindexed=true)`.
 
+Run a tagged subset with `PG_PAGECOPY_TAGS` (comma-separated Gherkin tags;
+features carry area tags like `@hash`, `@brin`, `@btree_extended`,
+`@core`, `@validation`, and finer tags like `@recovery`, `@local`):
+
+```sh
+make bdd PG_VERSION=17 PG_PAGECOPY_TAGS=hash
+```
+
+A tagged run executes only matching scenarios and relaxes the strict
+"no skipped scenarios" policy, so it is for focused iteration; untagged full
+runs stay strict. Scenarios tagged `@cross` only run in cross-major runs.
+
 ## License
 
 MIT

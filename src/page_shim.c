@@ -137,9 +137,30 @@ pc_assert_heap_page_frozen(Relation rel, Page page, BlockNumber blkno)
                         blkno, RelationGetRelid(rel))));
 }
 
+static bool
+pc_page_is_all_zero(Page page)
+{
+    int i;
+
+    for (i = 0; i < BLCKSZ; i++)
+        if (((const char *) page)[i] != 0)
+            return false;
+    return true;
+}
+
 static void
 pc_finish_page(Page page, BlockNumber blkno, bool checksums)
 {
+    if (PageIsNew(page) && pc_page_is_all_zero(page))
+    {
+        /* A legitimately unallocated page (hash bucket allocation reserves
+         * whole phases of all-zero blocks between used pages) must stay
+         * byte-exact: stamping an LSN or checksum would make the imported
+         * page fail verification, and crash recovery must keep restoring it
+         * as zero. A partially nonzero uninitialized page still passes
+         * through untouched here and pc_verify_page rejects it. */
+        return;
+    }
     PageSetLSN(page, (XLogRecPtr) 1);
     ((PageHeader) page)->pd_prune_xid = 0;
     if (checksums)
@@ -164,16 +185,12 @@ pc_verify_page(Page page, BlockNumber blkno, bool checksums)
     PageHeader phdr = (PageHeader) page;
     uint16 stored;
     bool ok;
-    int i;
 
     if (PageIsNew(page))
     {
         /* A new page is legitimate only when entirely zeroed; the checksum
          * setters skip such pages, so they must never pass by default. */
-        for (i = 0; i < BLCKSZ; i++)
-            if (((const char *) page)[i] != 0)
-                return false;
-        return true;
+        return pc_page_is_all_zero(page);
     }
 
     if (PageGetPageLayoutVersion(page) != PG_PAGE_LAYOUT_VERSION ||
