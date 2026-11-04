@@ -375,8 +375,8 @@ impl ImportState {
                     0xFF;
             }
         }
-        // Only main-fork pages carry data checksums; VM and FSM pages transfer
-        // byte-exact without verification.
+        // Only main-fork pages get full layout verification; VM and FSM
+        // pages arrive pre-stamped by the exporter (LSN reset, checksum).
         if fork == MAIN_FORK
             && !Rel::verify_page(
                 packet.block,

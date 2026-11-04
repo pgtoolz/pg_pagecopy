@@ -663,6 +663,11 @@ impl ExportState {
                         Rel::prepare_page(self.block, &mut page, self.manifest.target_checksums);
                     }
                 }
+            } else {
+                // VM/FSM pages carry the source cluster's LSN in their page
+                // header; copied verbatim it lies in the target's future and
+                // XLogFlush fails fatally on PG13/14 at the next write.
+                Rel::prepare_page(self.block, &mut page, self.manifest.target_checksums);
             }
             let packet = wire::encode_page(
                 u16::try_from(self.relation_index).expect("relation count fits u16"),
