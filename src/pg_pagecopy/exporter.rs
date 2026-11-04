@@ -1,7 +1,6 @@
 use super::ffi::{self, Rel, FSM_FORK, MAIN_FORK, PAGE_SIZE, VM_FORK};
-use super::wire::{
-    self, IndexTransfer, Manifest, Relation, RelationKind, SchemaColumn, SchemaIndex, TableSchema,
-};
+use super::indexes::{classify_index_with, toast_index_verdict, ClassifyIndex, IndexTransfer};
+use super::wire::{self, Manifest, Relation, RelationKind, SchemaColumn, SchemaIndex, TableSchema};
 use pgrx::iter::SetOfIterator;
 use pgrx::pg_sys;
 use pgrx::spi::Spi;
@@ -45,64 +44,6 @@ unsafe fn push_relation(
             toast_index_oid: 0,
         });
     }
-}
-
-/// How one source index crosses to the target. The metadata callback selects
-/// catalog-only preflight or the full physical checks, sharing all other rules.
-enum ClassifyIndex<T> {
-    Physical(T),
-    /// Transfer the definition only; the target index stays INVALID until REINDEX.
-    Invalid {
-        definition: String,
-        unique: bool,
-        reason: String,
-    },
-}
-
-/// Classify one opened source index. Everything that cannot move as page
-/// images degrades to its definition. Custom opclasses remain a hard error.
-///
-/// # Safety
-/// Reads the source catalog; runs inside PostgreSQL. The callback decides
-/// whether physical metadata is read.
-unsafe fn classify_index_with<T>(
-    index: &Rel,
-    metadata: impl FnOnce(pg_sys::Oid) -> Result<T, String>,
-) -> Result<ClassifyIndex<T>, String> {
-    let index_oid = index.oid();
-    let degradable = |reason: String| -> Result<ClassifyIndex<T>, String> {
-        ffi::ensure_no_custom_opclass(index_oid)?;
-        Ok(ClassifyIndex::Invalid {
-            definition: ffi::index_definition(index_oid)?,
-            unique: index.is_unique(),
-            reason,
-        })
-    };
-    if let Some(reason) = index.non_physical_reason() {
-        return degradable(reason);
-    }
-    match metadata(index_oid) {
-        Ok(metadata) => Ok(ClassifyIndex::Physical(metadata)),
-        Err(reason) => degradable(reason),
-    }
-}
-
-/// Shared verdict for a source TOAST index: unlike user indexes it can
-/// never degrade to a definition, so a non-btree is a hard error and the
-/// metadata callback decides the rest. `pagecopy.check` reports the same
-/// reasons with a catalog-only callback.
-///
-/// # Safety
-/// Opens the index under `AccessShareLock` until the statement ends.
-unsafe fn toast_index_verdict<T>(
-    toast_index_oid: pg_sys::Oid,
-    metadata: impl FnOnce(pg_sys::Oid) -> Result<T, String>,
-) -> Result<T, String> {
-    let toast_index = Rel::open(toast_index_oid, pg_sys::AccessShareLock.cast_signed());
-    if !toast_index.is_btree() {
-        return Err("source TOAST index is not a supported btree".into());
-    }
-    metadata(toast_index_oid)
 }
 
 /// One `pagecopy.check` result row: name, type, supported, method, size, detail.

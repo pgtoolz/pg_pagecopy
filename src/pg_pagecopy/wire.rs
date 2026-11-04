@@ -1,6 +1,9 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 
+use super::indexes::wire::{decode_index, encode_index};
+use super::indexes::IndexTransfer;
+
 pub const MAGIC: [u8; 4] = *b"PGPC";
 pub const HEADER_LEN: usize = 10;
 pub const PAGE_HEADER_LEN: usize = 12;
@@ -79,34 +82,6 @@ pub struct Attribute {
     pub generated: u8,
     pub not_null: bool,
     pub dropped: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BtreeMetadata {
-    pub definition: String,
-    pub shape: String,
-    pub btree_version: u32,
-    pub all_equal_image: bool,
-    pub expected_all_equal_image: bool,
-}
-
-impl BtreeMetadata {
-    pub fn has_same_physical_layout(&self, other: &Self) -> bool {
-        // Dedup flags belong to the source metapage; newer majors can read older non-dedup pages.
-        self.definition == other.definition
-            && self.shape == other.shape
-            && self.btree_version == other.btree_version
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IndexTransfer {
-    Btree(BtreeMetadata),
-    /// Keep the index definition, but do not transfer or enable its contents.
-    Invalid {
-        definition: String,
-        unique: bool,
-    },
 }
 
 pub fn validate_attributes(attributes: &[Attribute]) -> std::result::Result<(), String> {
@@ -291,27 +266,13 @@ impl Manifest {
         }
         put_len(&mut out, self.indexes.len(), MAX_RELATIONS, "indexes")?;
         for index in &self.indexes {
-            match index {
-                IndexTransfer::Btree(metadata) => {
-                    out.push(0);
-                    put_string(&mut out, &metadata.definition)?;
-                    put_string(&mut out, &metadata.shape)?;
-                    put_u32(&mut out, metadata.btree_version)?;
-                    out.push(u8::from(metadata.all_equal_image));
-                    out.push(u8::from(metadata.expected_all_equal_image));
-                }
-                IndexTransfer::Invalid { definition, unique } => {
-                    out.push(1);
-                    put_string(&mut out, definition)?;
-                    out.push(u8::from(*unique));
-                }
-            }
+            encode_index(&mut out, index)?;
         }
         Ok(out)
     }
 
     pub fn decode(input: &[u8]) -> Result<Self> {
-        let mut decoder = Decoder { input, offset: 0 };
+        let mut decoder = Decoder::new(input);
         let source_table = decoder.string()?;
         let target_table = decoder.string()?;
         let source_checksums = decoder.boolean()?;
@@ -360,20 +321,7 @@ impl Manifest {
         let index_count = decoder.len(MAX_RELATIONS, "indexes")?;
         let mut indexes = Vec::with_capacity(index_count);
         for _ in 0..index_count {
-            indexes.push(match decoder.u8()? {
-                0 => IndexTransfer::Btree(BtreeMetadata {
-                    definition: decoder.string()?,
-                    shape: decoder.string()?,
-                    btree_version: decoder.u32()?,
-                    all_equal_image: decoder.boolean()?,
-                    expected_all_equal_image: decoder.boolean()?,
-                }),
-                1 => IndexTransfer::Invalid {
-                    definition: decoder.string()?,
-                    unique: decoder.boolean()?,
-                },
-                kind => return Err(WireError(format!("unknown index transfer kind {kind}"))),
-            });
+            indexes.push(decode_index(&mut decoder)?);
         }
         if decoder.offset != input.len() {
             return Err(WireError("trailing bytes in manifest".into()));
@@ -454,10 +402,7 @@ pub fn decode_schema(input: &[u8]) -> Result<TableSchema> {
     if input[4] != 0 || input[5] != 0 {
         return Err(WireError("unsupported pg_pagecopy schema header".into()));
     }
-    let mut decoder = Decoder {
-        input: &input[SCHEMA_HEADER_LEN..],
-        offset: 0,
-    };
+    let mut decoder = Decoder::new(&input[SCHEMA_HEADER_LEN..]);
     let column_count = decoder.len(MAX_ATTRIBUTES, "schema columns")?;
     let mut columns = Vec::with_capacity(column_count);
     for _ in 0..column_count {
@@ -699,7 +644,7 @@ fn put_u16(output: &mut impl Write, value: u16) -> Result<()> {
     Ok(())
 }
 
-fn put_u32(output: &mut impl Write, value: u32) -> Result<()> {
+pub(super) fn put_u32(output: &mut impl Write, value: u32) -> Result<()> {
     output.write_all(&value.to_be_bytes())?;
     Ok(())
 }
@@ -715,7 +660,7 @@ fn put_len(output: &mut Vec<u8>, len: usize, max: usize, what: &str) -> Result<(
     Ok(())
 }
 
-fn put_string(output: &mut Vec<u8>, value: &str) -> Result<()> {
+pub(super) fn put_string(output: &mut Vec<u8>, value: &str) -> Result<()> {
     if value.len() > MAX_STRING {
         return Err(WireError("string exceeds wire limit".into()));
     }
@@ -735,9 +680,16 @@ fn put_optional_string(output: &mut Vec<u8>, value: Option<&str>) -> Result<()> 
     Ok(())
 }
 
-struct Decoder<'a> {
+/// Shared manifest reader; `indexes::wire` decodes its index entries with it.
+pub(super) struct Decoder<'a> {
     input: &'a [u8],
     offset: usize,
+}
+
+impl<'a> Decoder<'a> {
+    pub(super) fn new(input: &'a [u8]) -> Self {
+        Self { input, offset: 0 }
+    }
 }
 
 impl Decoder<'_> {
@@ -754,11 +706,11 @@ impl Decoder<'_> {
         Ok(bytes)
     }
 
-    fn u8(&mut self) -> Result<u8> {
+    pub(super) fn u8(&mut self) -> Result<u8> {
         Ok(self.take(1)?[0])
     }
 
-    fn u32(&mut self) -> Result<u32> {
+    pub(super) fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
     }
 
@@ -774,7 +726,7 @@ impl Decoder<'_> {
         Ok(i16::from_be_bytes(self.take(2)?.try_into().unwrap()))
     }
 
-    fn boolean(&mut self) -> Result<bool> {
+    pub(super) fn boolean(&mut self) -> Result<bool> {
         match self.u8()? {
             0 => Ok(false),
             1 => Ok(true),
@@ -791,7 +743,7 @@ impl Decoder<'_> {
         }
     }
 
-    fn string(&mut self) -> Result<String> {
+    pub(super) fn string(&mut self) -> Result<String> {
         let length = usize::try_from(self.u32()?).expect("u32 length fits usize");
         if length > MAX_STRING {
             return Err(WireError("string exceeds wire limit".into()));
@@ -812,6 +764,7 @@ impl Decoder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pg_pagecopy::indexes::BtreeMetadata;
 
     fn attribute() -> Attribute {
         Attribute {
@@ -830,25 +783,6 @@ mod tests {
             not_null: true,
             dropped: false,
         }
-    }
-
-    #[test]
-    fn btree_layout_allows_dedup_flag_changes_across_majors() {
-        let source = BtreeMetadata {
-            definition: "btree (chunk_id, chunk_seq)".into(),
-            shape: "2|2|t|f|1 2|0 0|pg_catalog.oid_ops,pg_catalog.int4_ops|".into(),
-            btree_version: 4,
-            all_equal_image: false,
-            expected_all_equal_image: false,
-        };
-        let mut target = BtreeMetadata {
-            all_equal_image: true,
-            expected_all_equal_image: true,
-            ..source.clone()
-        };
-        assert!(source.has_same_physical_layout(&target));
-        target.btree_version = 3;
-        assert!(!source.has_same_physical_layout(&target));
     }
 
     fn manifest() -> Manifest {

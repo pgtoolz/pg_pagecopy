@@ -1,3 +1,4 @@
+use super::indexes::BtreeMetadata;
 use super::wire;
 use pgrx::{pg_sys, spi::Spi};
 use std::ffi::CStr;
@@ -782,12 +783,12 @@ pub fn index_catalog_metadata(oid: pg_sys::Oid) -> Result<(String, String), Stri
     Ok((index_definition(oid)?, shape))
 }
 
-pub fn index_metadata(oid: pg_sys::Oid) -> Result<wire::BtreeMetadata, String> {
+pub fn index_metadata(oid: pg_sys::Oid) -> Result<BtreeMetadata, String> {
     let (definition, shape) = index_catalog_metadata(oid)?;
     let rel = unsafe { Rel::open(oid, pg_sys::ShareLock.cast_signed()) };
     let mut raw = RawBtreeMetadata::default();
     unsafe { guard(|| pc_btree_metadata(rel.0, &raw mut raw)) };
-    Ok(wire::BtreeMetadata {
+    Ok(BtreeMetadata {
         definition,
         shape,
         btree_version: raw.version,

@@ -72,6 +72,7 @@ pub mod pg_pagecopy {
     mod exporter;
     mod ffi;
     mod importer;
+    mod indexes;
     mod source_client;
     mod wire;
 

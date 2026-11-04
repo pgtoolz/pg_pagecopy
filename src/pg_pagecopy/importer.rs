@@ -1,6 +1,7 @@
 use super::ffi::{self, Rel, MAIN_FORK};
+use super::indexes::{self, IndexTransfer};
 use super::source_client::SourceClient;
-use super::wire::{self, IndexTransfer, Manifest, RelationKind, TableSchema};
+use super::wire::{self, Manifest, RelationKind, TableSchema};
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 use pgrx::spi::Spi;
@@ -247,12 +248,7 @@ fn prepare_state(
         let IndexTransfer::Btree(expected) = &manifest.indexes[0] else {
             return Err("source TOAST index is not physical".into());
         };
-        let actual = ffi::index_metadata(target.oid())?;
-        if !actual.has_same_physical_layout(expected) {
-            return Err(format!(
-                "source and target TOAST btree metadata differ: source={expected:?}, target={actual:?}"
-            ));
-        }
+        indexes::toast_layout(expected, target)?;
     }
 
     let mut targets = Vec::with_capacity(manifest.relations.len());
@@ -261,43 +257,10 @@ fn prepare_state(
         targets.push(target_toast.ok_or_else(|| "missing target TOAST relation".to_owned())?);
         targets.push(target_toast_index.ok_or_else(|| "missing target TOAST index".to_owned())?);
     }
-    for source_index in &manifest.indexes[user_index_start..] {
-        let position = match source_index {
-            IndexTransfer::Btree(expected) => target_indexes.iter().position(|(_, index)| {
-                index.is_btree()
-                    && ffi::index_metadata(index.oid())
-                        .is_ok_and(|actual| actual.has_same_physical_layout(expected))
-            }),
-            IndexTransfer::Invalid { definition, unique } => target_indexes
-                .iter()
-                .position(|(candidate, index)| {
-                    candidate == definition && index.is_unique() == *unique && !index.is_btree()
-                })
-                .or_else(|| {
-                    target_indexes.iter().position(|(candidate, index)| {
-                        candidate == definition && index.is_unique() == *unique
-                    })
-                }),
-        }
-        .ok_or_else(|| format!("target lacks source index ({source_index:?})"))?;
-        let (_, index) = target_indexes.remove(position);
-        match source_index {
-            IndexTransfer::Btree(_) => {
-                index.set_validity(true);
-                targets.push(index);
-            }
-            IndexTransfer::Invalid { .. } => {
-                index.set_validity(false);
-                pgrx::warning!(
-                    "pg_pagecopy: index {} was transferred as INVALID and is not maintained; any uniqueness/exclusion enforcement it provides is disabled, and replica identity using it may be unusable; prevent duplicate/conflicting writes and run REINDEX INDEX before use",
-                    index.name()
-                );
-            }
-        }
-    }
-    if !target_indexes.is_empty() {
-        return Err("target has unmatched indexes".into());
-    }
+    targets.extend(indexes::match_user_indexes(
+        &manifest.indexes[user_index_start..],
+        &mut target_indexes,
+    )?);
 
     for target in &targets {
         target.reset_storage();
