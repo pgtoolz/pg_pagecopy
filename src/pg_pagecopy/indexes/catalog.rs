@@ -9,9 +9,10 @@
 use super::super::ffi::{self, Rel};
 use super::brin;
 use super::btree;
+use super::gin;
 use super::hash;
 use super::wire::IndexTransfer;
-use super::{BrinMetadata, BtreeMetadata, HashMetadata};
+use super::{BrinMetadata, BtreeMetadata, GinMetadata, HashMetadata};
 use pgrx::pg_sys;
 
 /// How one source index crosses to the target. The metadata callback selects
@@ -60,6 +61,7 @@ pub enum PhysicalMetadata {
     Btree(BtreeMetadata),
     Brin(BrinMetadata),
     Hash(HashMetadata),
+    Gin(GinMetadata),
 }
 
 /// Classify one opened source index for transfer, reading the full physical
@@ -73,6 +75,8 @@ pub unsafe fn classify_index(index: &Rel) -> Result<ClassifyIndex<PhysicalMetada
             hash::metadata(oid).map(PhysicalMetadata::Hash)
         } else if index.is_brin_am() {
             brin::metadata(oid).map(PhysicalMetadata::Brin)
+        } else if index.is_gin_am() {
+            gin::metadata(oid).map(PhysicalMetadata::Gin)
         } else {
             btree::metadata(oid).map(PhysicalMetadata::Btree)
         }
@@ -89,6 +93,8 @@ pub unsafe fn catalog_preflight(index: &Rel, index_oid: pg_sys::Oid) -> Result<(
         hash::catalog_preflight(index_oid)
     } else if index.is_brin_am() {
         brin::catalog_preflight(index_oid)
+    } else if index.is_gin_am() {
+        gin::catalog_preflight(index_oid)
     } else {
         ffi::index_catalog_metadata(index_oid).map(|_| ())
     }
@@ -107,6 +113,9 @@ impl From<ClassifyIndex<PhysicalMetadata>> for IndexTransfer {
             }
             ClassifyIndex::Physical(PhysicalMetadata::Hash(metadata)) => {
                 IndexTransfer::Hash(metadata)
+            }
+            ClassifyIndex::Physical(PhysicalMetadata::Gin(metadata)) => {
+                IndexTransfer::Gin(metadata)
             }
             ClassifyIndex::Invalid {
                 definition,
@@ -151,9 +160,10 @@ pub fn verify_toast_layout(entry: &IndexTransfer, target: &Rel) -> Result<(), St
     match entry {
         IndexTransfer::Btree(expected) => btree::toast_layout(expected, target),
         // A TOAST index is always a btree; no other kind can be physical.
-        IndexTransfer::Invalid { .. } | IndexTransfer::Brin(_) | IndexTransfer::Hash(_) => {
-            Err("source TOAST index is not physical".into())
-        }
+        IndexTransfer::Invalid { .. }
+        | IndexTransfer::Brin(_)
+        | IndexTransfer::Hash(_)
+        | IndexTransfer::Gin(_) => Err("source TOAST index is not physical".into()),
     }
 }
 
@@ -173,6 +183,7 @@ pub fn verify_index_metapage(entry: &IndexTransfer, page: &mut [u8], blocks: u32
         IndexTransfer::Btree(metadata) => btree::verify_metapage(page, metadata.all_equal_image),
         IndexTransfer::Brin(metadata) => brin::verify_metapage(page, metadata, blocks),
         IndexTransfer::Hash(metadata) => hash::verify_metapage(page, metadata, blocks),
+        IndexTransfer::Gin(metadata) => gin::verify_metapage(page, metadata, blocks),
         IndexTransfer::Invalid { .. } => false,
     }
 }
@@ -197,11 +208,14 @@ pub fn match_user_indexes(
             IndexTransfer::Hash(expected) => target_indexes
                 .iter()
                 .position(|(_, index)| hash::matches_layout(expected, index)),
+            IndexTransfer::Gin(expected) => target_indexes
+                .iter()
+                .position(|(_, index)| gin::matches_layout(expected, index)),
             IndexTransfer::Invalid { definition, unique } => target_indexes
                 .iter()
                 .position(|(candidate, index)| {
                     // Exclude every target that could be a physical
-                    // candidate: `is_btree`/`is_brin`/`is_hash` are true only
+                    // candidate: `is_btree`/`is_brin`/`is_hash`/`is_gin` are true only
                     // for a valid, ready, non-exclusion index of that AM, so
                     // this keeps invalid targets preferred while a degraded
                     // source entry can never consume the only valid target
@@ -211,6 +225,7 @@ pub fn match_user_indexes(
                         && !index.is_btree()
                         && !index.is_brin()
                         && !index.is_hash()
+                        && !index.is_gin()
                 })
                 .or_else(|| {
                     target_indexes.iter().position(|(candidate, index)| {
@@ -221,7 +236,10 @@ pub fn match_user_indexes(
         .ok_or_else(|| format!("target lacks source index ({source_index:?})"))?;
         let (_, index) = target_indexes.remove(position);
         match source_index {
-            IndexTransfer::Btree(_) | IndexTransfer::Brin(_) | IndexTransfer::Hash(_) => {
+            IndexTransfer::Btree(_)
+            | IndexTransfer::Brin(_)
+            | IndexTransfer::Hash(_)
+            | IndexTransfer::Gin(_) => {
                 index.set_validity(true);
                 physical.push(index);
             }

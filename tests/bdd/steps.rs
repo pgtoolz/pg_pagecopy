@@ -38,6 +38,21 @@ const LH_OVERFLOW_PAGE: u16 = 0x0001;
 const LH_BITMAP_PAGE: u16 = 0x0004;
 /// `LH_META_PAGE`.
 const LH_META_PAGE: u16 = 0x0008;
+/// `MAXALIGN(sizeof(GinPageOpaqueData))`: every GIN page ends with this
+/// 8-byte special space; GIN carries no page id word.
+const GIN_SPECIAL_SIZE: usize = 8;
+/// `GIN_META`, stored little-endian in the flags halfword of the special
+/// space.
+const GIN_META: u16 = 1 << 3;
+/// `GIN_LEAF`: entry-tree leaf pages.
+const GIN_LEAF: u16 = 1 << 1;
+/// `GIN_DATA`: posting-tree pages.
+const GIN_DATA: u16 = 1 << 0;
+/// `GIN_LIST`: pending-list pages.
+const GIN_LIST: u16 = 1 << 4;
+/// `MAXALIGN(sizeof(ItemPointerData))`: the right bound of a posting-tree
+/// data page sits right after the page header.
+const GIN_DATA_HEADER_SIZE: usize = 24 + 8;
 
 /// Whether a block is a revmap page whose TID array carries entries: the
 /// BRIN revmap page type is present and some TID byte outside the special
@@ -90,8 +105,37 @@ fn hash_page_carries_tuples(page: &[u8], page_type: u16) -> bool {
 /// allocation phases up front and initializes only each batch's final page,
 /// so a valid hash index legitimately contains all-zero sparse blocks.
 fn hash_page_is_all_zero(page: &[u8]) -> bool {
+    page_is_all_zero(page)
+}
+
+fn page_is_all_zero(page: &[u8]) -> bool {
     assert_eq!(page.len(), BLOCK_SIZE);
     page.iter().all(|byte| *byte == 0)
+}
+
+/// A GIN page's `flags` halfword, little-endian, in the special space.
+fn gin_page_flags(page: &[u8]) -> u16 {
+    assert_eq!(page.len(), BLOCK_SIZE);
+    assert_eq!(GIN_SPECIAL_SIZE, 8);
+    u16::from_le_bytes([page[BLOCK_SIZE - 2], page[BLOCK_SIZE - 1]])
+}
+
+/// Whether a block is a GIN page of the given kind. Kinds mirror the
+/// `GinPageOpaqueData` flag bits: `meta` is exactly `GIN_META`, `entry` an
+/// entry-tree leaf (legitimately empty while the whole index lives in the
+/// pending list), `data` any populated posting-tree page and `pending` a
+/// populated pending-list page.
+fn is_gin_page_kind(page: &[u8], kind: &str) -> bool {
+    let flags = gin_page_flags(page);
+    let lower = u16::from_le_bytes([page[12], page[13]]) as usize;
+    match kind {
+        "meta" => flags == GIN_META,
+        "entry" => flags == GIN_LEAF,
+        "data" => flags & GIN_DATA != 0 && lower > GIN_DATA_HEADER_SIZE,
+        "pending" => flags & GIN_LIST != 0 && lower > 24,
+        "all-zero" => page_is_all_zero(page),
+        _ => panic!("gin page kind must be meta, entry, data, pending or all-zero, not {kind:?}"),
+    }
 }
 
 #[given("a fresh PostgreSQL pair")]
@@ -595,7 +639,7 @@ async fn record_target_block_checked(
     world: &mut AttachWorld,
     relation: String,
     block: u64,
-    check: fn(&[u8]) -> bool,
+    check: impl Fn(&[u8]) -> bool,
     kind: &str,
 ) {
     let sql = format!("SELECT pg_relation_filepath('{relation}')");
@@ -661,6 +705,18 @@ async fn record_target_hash_page(
         "all-zero" => hash_page_is_all_zero,
         _ => panic!("hash page kind must be meta, bucket, overflow, bitmap or all-zero, not {kind:?}"),
     };
+    record_target_block_checked(world, relation, block, check, &kind).await;
+}
+
+#[when(expr = "target relation {string} block {int} is recorded as a gin {string} page")]
+async fn record_target_gin_page(
+    world: &mut AttachWorld,
+    relation: String,
+    block: u64,
+    kind: String,
+) {
+    let owned = kind.clone();
+    let check = move |page: &[u8]| is_gin_page_kind(page, &owned);
     record_target_block_checked(world, relation, block, check, &kind).await;
 }
 
@@ -870,5 +926,65 @@ mod tests {
             super::LH_BUCKET_PAGE,
             32
         )));
+    }
+
+    fn gin_page(flags: u16, lower: u16) -> [u8; BLOCK_SIZE] {
+        let mut page = [0u8; BLOCK_SIZE];
+        page[BLOCK_SIZE - 2..BLOCK_SIZE].copy_from_slice(&flags.to_le_bytes());
+        page[12..14].copy_from_slice(&lower.to_le_bytes());
+        page
+    }
+
+    #[test]
+    fn a_gin_page_is_recognized_only_by_its_flag_kind_and_content() {
+        // Self-check for the crash scenarios' page-kind guards: every kind
+        // needs its exact flag bits, and entry/data/pending pages must carry
+        // content below or past the page header, not just flag bits.
+        assert_eq!(super::GIN_SPECIAL_SIZE, 8);
+        assert!(super::is_gin_page_kind(
+            &gin_page(super::GIN_META, 80),
+            "meta"
+        ));
+        assert!(!super::is_gin_page_kind(
+            &gin_page(super::GIN_DATA, 80),
+            "meta"
+        ));
+        assert!(super::is_gin_page_kind(
+            &gin_page(super::GIN_LEAF, 32),
+            "entry"
+        ));
+        assert!(super::is_gin_page_kind(
+            &gin_page(super::GIN_LEAF, 24),
+            "entry"
+        ));
+        assert!(!super::is_gin_page_kind(
+            &gin_page(super::GIN_META, 32),
+            "entry"
+        ));
+        assert!(super::is_gin_page_kind(
+            &gin_page(super::GIN_DATA | super::GIN_LEAF, 40),
+            "data"
+        ));
+        assert!(super::is_gin_page_kind(
+            &gin_page(super::GIN_DATA, 40),
+            "data"
+        ));
+        assert!(!super::is_gin_page_kind(
+            &gin_page(super::GIN_DATA, 24),
+            "data"
+        ));
+        assert!(super::is_gin_page_kind(
+            &gin_page(super::GIN_LIST, 32),
+            "pending"
+        ));
+        assert!(!super::is_gin_page_kind(
+            &gin_page(super::GIN_LIST, 24),
+            "pending"
+        ));
+        assert!(super::is_gin_page_kind(&[0u8; BLOCK_SIZE], "all-zero"));
+        assert!(!super::is_gin_page_kind(
+            &gin_page(super::GIN_META, 80),
+            "all-zero"
+        ));
     }
 }

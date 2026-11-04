@@ -1,7 +1,8 @@
 # pg_pagecopy
 
 Copies a PostgreSQL table to another instance as ready-made data pages: heap,
-TOAST, visibility maps and plain btree indexes. No row decoding. On a
+TOAST, visibility maps and the whitelisted btree, BRIN, hash and GIN
+indexes. No row decoding. On a
 ~1.2 GB TOAST-heavy benchmark table it was 2.5× faster than
 `COPY ... FORMAT binary` with 4.7× less CPU, and 6.2× faster than
 `pg_dump -Fc`. The margin is workload-dependent: it grows with more indexes
@@ -113,9 +114,16 @@ Step by step:
    checksums and LSNs.
 5. Indexes: a valid, ready plain btree with `pg_catalog` opclasses
    (partial and expression included) is copied as pages, including a btree
-   backing a primary key or unique constraint. Every other source index —
-   hash, GiST, GIN, BRIN, SP-GiST, invalid on source, and every exclusion
-   index — arrives as a definition marked invalid: run `REINDEX` after the
+   backing a primary key or unique constraint. BRIN, hash and GIN transfer
+   as pages too, but only on narrow per-AM whitelists of exact core
+   opclass/type pairs whose on-disk representation is byte-stable across
+   the supported majors: BRIN fixed-width minmax summaries, hash
+   int2/int4/int8 ops, GIN `array_ops` on `int[]` and `jsonb_ops` on `jsonb`
+   (plain single-column keys; a nonempty GIN pending list is copied
+   whole). Every other source index — other GIN/GiST/SP-GiST and
+   non-whitelisted hash/BRIN opclasses, expressions, partials, multicolumn
+   keys, invalid on source, and every exclusion index — arrives as a
+   definition marked invalid: run `REINDEX` after the
    transfer, and until then uniqueness/exclusion are **not enforced**
    (recovery notes in Limits). Custom opclasses are rejected outright.
 
@@ -145,8 +153,8 @@ after a target VACUUM.
 - `physical` — pages copied as-is, usable right after the transfer;
 - `definition` — recreated from its definition, then marked invalid
   (`indisvalid=false`, `indisready=false`) and rebuilt with `REINDEX`;
-  `detail` explains why (`index access method hash`, `invalid on source`,
-  or a backing constraint);
+  `detail` explains why (`index access method gist`, `invalid on source`,
+  an off-whitelist opclass, or a backing constraint);
 - `error` — the source-side transfer plan is unsupported (unsafe column type,
   custom opclass, or another catalog restriction).
 
@@ -169,7 +177,8 @@ Example output:
  name                      | type        | supported | method     | size  | detail
 ---------------------------+-------------+-----------+------------+-------+-----------------------------------------------------------
  events_custom             | index       | f         | error      |  8192 | custom opclasses are not supported; only pg_catalog btree opclasses are allowed
- events_hash               | index       | t         | definition |  8192 | index access method hash
+ events_gin                | index       | t         | definition |  8192 | gin opclass pg_catalog.tsvector_ops on tsvector is not one of the core array_ops/jsonb_ops pairs
+ events_hash               | index       | t         | definition |  8192 | hash opclass pg_catalog.text_ops on text is not one of the core int2/int4/int8 pairs
  events_key                | index       | t         | definition |  8192 | invalid on source
  events_valid              | index       | t         | physical   | 16384 |
  pg_toast.pg_toast_16401   | toast       | t         | physical   |  8192 |
@@ -188,7 +197,10 @@ Example output:
 - Heap tables only: no partitions, foreign or unlogged tables, downgrades,
   differing checksum modes.
 - Only valid, ready plain btree indexes (`pg_catalog` opclasses, partial and
-  expression variants) are copied as pages; every other index arrives as an
+  expression variants) are copied as pages, plus the narrow per-AM
+  whitelists for BRIN (fixed-width minmax), hash (int2/int4/int8) and GIN
+  (`array_ops` on `int[]`, `jsonb_ops` on `jsonb`; plain single-column keys
+  only, pending list copied whole); every other index arrives as an
   invalid definition to `REINDEX` yourself — until then uniqueness/exclusion
   are not enforced. Cross-major deparse drift fails closed; custom opclasses
   are rejected. After transfer, `REINDEX` alone restores enforcement on an
@@ -230,7 +242,7 @@ overwrite, auto-creation, validation, rollback and cross-major transfers,
 verified with `verify_heapam` and `bt_index_check(..., heapallindexed=true)`.
 
 Run a tagged subset with `PG_PAGECOPY_TAGS` (comma-separated Gherkin tags;
-features carry area tags like `@hash`, `@brin`, `@btree_extended`,
+features carry area tags like `@hash`, `@brin`, `@gin`, `@btree_extended`,
 `@core`, `@validation`, and finer tags like `@recovery`, `@local`):
 
 ```sh
