@@ -81,4 +81,10 @@ nix develop ./tests/bdd#pg18
 
 Postmaster logs сохраняются в `target/bdd-logs/<major>/` или
 `target/bdd-logs/<source>-<target>/`. GitHub Actions загружает их после каждого
-запуска; same-major job имеет timeout 20 минут, cross-major — 40 минут.
+запуска; same-major job имеет timeout 30 минут, cross-major — 40 минут.
+
+Cross-major matrix выполняет пары параллельно. Runner фильтрует сценарии по фактической
+major-паре в первом Given-шаге после подстановки Examples: каждая пара выполняет
+свои forward scenarios и reverse downgrade один раз, а fixed same-major scenarios
+работают только в anchor-job `13 -> 18`. Docker-образ собирает extension и fixtures
+только для source/target major, а не для всех поддерживаемых версий.

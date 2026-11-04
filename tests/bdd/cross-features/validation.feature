@@ -408,7 +408,7 @@ Feature: Cross-major transfer rejects unsafe physical layouts
       | 17           | 18           |
 
   Scenario Outline: A <source_major> to <target_major> export rejects a corrupted source page
-    Given a fresh PostgreSQL 16 to 17 pair with checksums "enabled"
+    Given a fresh PostgreSQL <source_major> to <target_major> pair with checksums "enabled"
     And the following SQL is executed on "source":
       """
       CREATE EXTENSION pg_pagecopy;
