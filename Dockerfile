@@ -11,10 +11,13 @@ RUN rustup component add rustfmt clippy
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl gnupg clang libclang-dev pkg-config \
     # postgresql.org intermittently resets HTTP/2 streams; force HTTP/1.1 and
-    # retry so CI does not fail on key fetches (curl 18 / no valid OpenPGP)
+    # retry so CI does not fail on key fetches (curl 18 / no valid OpenPGP).
+    # NB: gpg --dearmor exits 0 on empty input, so curl must land in a file
+    # first - piping `curl | gpg` would break the retry loop on first failure.
     && for i in 1 2 3 4 5; do \
          curl --http1.1 -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-           | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
+           -o /tmp/pgdg.asc \
+           && gpg --dearmor -o /usr/share/keyrings/postgresql.gpg /tmp/pgdg.asc \
            && break || sleep $((i * 5)); \
        done \
     && test -s /usr/share/keyrings/postgresql.gpg \
