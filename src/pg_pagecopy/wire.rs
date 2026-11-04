@@ -904,6 +904,57 @@ mod tests {
     }
 
     #[test]
+    fn manifest_bytes_keep_their_complete_wire_layout() {
+        // Golden bytes of the whole manifest body. The round trip above
+        // cannot catch a symmetric encode/decode change; these bytes are the
+        // on-wire contract between pg_pagecopy versions (header in
+        // `headers_use_versioned_layout`, index tags 0/1 in `indexes::wire`).
+        let mut expected: Vec<u8> = Vec::new();
+        expected.extend_from_slice(b"\x00\x00\x00\x0dpublic.events");
+        expected.extend_from_slice(b"\x00\x00\x00\x12public.events_copy");
+        expected.extend_from_slice(&[1, 1]); // source/target checksum flags
+        expected.extend_from_slice(&3u32.to_be_bytes()); // relfrozenxid
+        expected.extend_from_slice(&1u32.to_be_bytes()); // relminmxid
+        expected.extend_from_slice(&[0; 8]); // absent TOAST horizons
+        expected.extend_from_slice(&1u32.to_be_bytes()); // relation count
+        expected.extend_from_slice(b"\x00\x00\x00\x2a\x00\x00\x00\x06events");
+        expected.extend_from_slice(&[0, 0]); // kind Main, fork
+        expected.extend_from_slice(&1u32.to_be_bytes()); // blocks
+        expected.extend_from_slice(&0u32.to_be_bytes()); // toast_index_oid
+        expected.extend_from_slice(&1u32.to_be_bytes()); // attribute count
+        expected.extend_from_slice(b"\x00\x00\x00\x02id");
+        expected.extend_from_slice(b"\x00\x00\x00\x0fpg_catalog.int4");
+        expected.extend_from_slice(&[0]); // no collation
+        expected.extend_from_slice(&[0; 8]); // both collation versions empty
+        expected.extend_from_slice(&(-1i32).to_be_bytes()); // typmod
+        expected.extend_from_slice(&4i16.to_be_bytes()); // len
+        expected.extend_from_slice(&[b'i', 1, b'p', 0, 0, 1, 0]);
+        // align, by_val, storage, has_missing, generated, not_null, dropped
+        expected.extend_from_slice(&2u32.to_be_bytes()); // index count
+        expected.extend_from_slice(b"\x00\x00\x00\x00\x0abtree (id)"); // tag 0 + length
+        expected.extend_from_slice(b"\x00\x00\x00\x0e1|1|1|int4_ops");
+        expected.extend_from_slice(&4u32.to_be_bytes()); // btree version
+        expected.extend_from_slice(&[1, 1]); // dedup layout flags
+        expected.extend_from_slice(b"\x01\x00\x00\x00\x0ehash (payload)"); // tag 1
+        expected.extend_from_slice(&[0]); // not unique
+        assert_eq!(manifest().encode().unwrap(), expected);
+    }
+
+    #[test]
+    fn rejects_truncated_trailing_and_unknown_kind_manifests() {
+        let bytes = manifest().encode().unwrap();
+        assert!(Manifest::decode(&bytes[..bytes.len() - 1]).is_err());
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(Manifest::decode(&trailing).is_err());
+        // The kind byte follows the relation name, the last "events".
+        let kind = bytes.windows(6).rposition(|w| w == b"events").unwrap() + 6;
+        let mut unknown_kind = bytes.clone();
+        unknown_kind[kind] = 3;
+        assert!(Manifest::decode(&unknown_kind).is_err());
+    }
+
+    #[test]
     fn page_stream_round_trip() {
         let value = manifest();
         let mut bytes = Vec::new();
