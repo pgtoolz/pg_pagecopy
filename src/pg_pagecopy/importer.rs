@@ -116,6 +116,7 @@ fn create_target(schema: &TableSchema, target_table: &str) -> Result<(), String>
     ffi::with_canonical_sql(|| create_target_inner(schema, target_table))
 }
 
+#[allow(clippy::too_many_lines)] // One CREATE sequence; no hidden helper state.
 fn create_target_inner(schema: &TableSchema, target_table: &str) -> Result<(), String> {
     if !schema.sequences.is_empty() {
         return Err(
@@ -124,6 +125,13 @@ fn create_target_inner(schema: &TableSchema, target_table: &str) -> Result<(), S
         );
     }
     let (target_name, parts) = quote_qualified_relation(target_table)?;
+    let namespace = if parts.len() == 2 {
+        parts[0].clone()
+    } else {
+        Spi::get_one::<String>("SELECT current_schema()::text")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "target has no current schema".to_owned())?
+    };
     if parts.len() == 2 {
         Spi::run(&format!(
             "CREATE SCHEMA IF NOT EXISTS {}",
@@ -189,10 +197,26 @@ fn create_target_inner(schema: &TableSchema, target_table: &str) -> Result<(), S
         .map_err(|error| error.to_string())?;
     }
     for index in &schema.indexes {
+        // A same-schema clone necessarily collides with the source index's
+        // own name; keep the source name only when the target namespace has
+        // it free and otherwise let PostgreSQL generate a collision-free
+        // target-local name (including duplicate-definition suffixes).
+        let name_free = Spi::get_one_with_args::<bool>(
+            "SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class AS c \
+             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2)",
+            &[namespace.clone().into(), index.name.clone().into()],
+        )
+        .map_err(|error| error.to_string())?
+        .unwrap_or(false);
+        let index_name = if name_free {
+            format!("{} ", quote_ident(&index.name))
+        } else {
+            String::new()
+        };
         Spi::run(&format!(
-            "CREATE {}INDEX {} ON {target_name} USING {}",
+            "CREATE {}INDEX {index_name}ON {target_name} USING {}",
             if index.unique { "UNIQUE " } else { "" },
-            quote_ident(&index.name),
             index.definition
         ))
         .map_err(|error| error.to_string())?;
@@ -300,7 +324,18 @@ fn prepare_state(
 }
 
 impl ImportState {
+    /// Zero-based stream ordinal of the index main fork ending at
+    /// `relation_index`, shared by metapage verification and test hooks.
+    fn index_ordinal(&self, relation_index: usize, fork: u8) -> Option<usize> {
+        self.manifest.relations[..=relation_index]
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Index && relation.fork == fork)
+            .count()
+            .checked_sub(1)
+    }
+
     /// Validate and install one decoded page packet.
+    #[allow(clippy::too_many_lines)] // The debug hooks sit beside the checks they target.
     fn accept(&mut self, mut packet: wire::PagePacket) -> Result<(), String> {
         let relation_index = usize::from(packet.relation);
         if relation_index >= self.routes.len() {
@@ -324,9 +359,11 @@ impl ImportState {
             return Err("page exceeds manifest relation length".into());
         }
         // Debug-only corruption hook for the BDD suite: flips one byte of a
-        // chosen heap block to exercise page verification end to end.
+        // chosen main-fork block to exercise page verification end to end.
         #[cfg(feature = "test-hooks")]
-        if relation_index == 0 {
+        if relation_index
+            == usize::try_from(crate::DEBUG_CORRUPT_PAGE_RELATION.get()).unwrap_or(usize::MAX)
+        {
             let block = crate::DEBUG_CORRUPT_PAGE.get();
             let offset = crate::DEBUG_CORRUPT_OFFSET.get();
             if block >= 0
@@ -353,24 +390,79 @@ impl ImportState {
             ));
         }
         if fork == MAIN_FORK && metadata.kind == RelationKind::Index && packet.block == 0 {
-            let ordinal = self.manifest.relations[..=relation_index]
-                .iter()
-                .filter(|relation| {
-                    relation.kind == RelationKind::Index && relation.fork == metadata.fork
-                })
-                .count()
-                .checked_sub(1)
-                .ok_or_else(|| "btree metadata ordinal underflow".to_owned())?;
+            let ordinal = self
+                .index_ordinal(relation_index, metadata.fork)
+                .ok_or_else(|| "index metadata ordinal underflow".to_owned())?;
+            // Debug-only corruption hook for the BDD suite: flip one byte of
+            // an incoming index metapage to exercise its validator end to
+            // end; restricted to one physical index ordinal when configured.
+            #[cfg(feature = "test-hooks")]
+            if usize::try_from(crate::DEBUG_CORRUPT_INDEX_METAPAGE.get())
+                .is_ok_and(|offset| offset < packet.bytes.len())
+                && (crate::DEBUG_CORRUPT_INDEX_ORDINAL.get() < 0
+                    || i32::try_from(ordinal)
+                        .is_ok_and(|ordinal| ordinal == crate::DEBUG_CORRUPT_INDEX_ORDINAL.get()))
+            {
+                packet.bytes[usize::try_from(crate::DEBUG_CORRUPT_INDEX_METAPAGE.get())
+                    .expect("nonnegative offset fits usize")] ^= 0xFF;
+            }
             let entry = indexes::physical_index(&self.manifest.indexes, ordinal)
-                .ok_or_else(|| "missing btree metadata in manifest".to_owned())?;
-            if !indexes::verify_index_metapage(entry, &mut packet.bytes) {
+                .ok_or_else(|| "missing index metadata in manifest".to_owned())?;
+            if !indexes::verify_index_metapage(entry, &mut packet.bytes, metadata.blocks) {
                 return Err(format!(
-                    "btree metapage verification failed for relation {relation_index}"
+                    "index metapage verification failed for relation {relation_index}"
                 ));
             }
         }
+        // Debug-only BDD hook: drop one incoming index page without
+        // installing it or advancing the expected block, so the next packet
+        // exercises the out-of-order rejection and a short stream the
+        // stream-ended-early rejection.
+        #[cfg(feature = "test-hooks")]
+        if fork == MAIN_FORK
+            && metadata.kind == RelationKind::Index
+            && relation_index
+                == usize::try_from(crate::DEBUG_DROP_INDEX_PAGE_RELATION.get())
+                    .unwrap_or(usize::MAX)
+            && packet.block
+                == u32::try_from(crate::DEBUG_DROP_INDEX_PAGE_BLOCK.get()).unwrap_or(u32::MAX)
+        {
+            return Ok(());
+        }
         self.targets[target_index].write_page(fork, packet.block, &packet.bytes);
         self.next_blocks[relation_index] += 1;
+        // Debug-only BDD milestone: park the import immediately after this
+        // BRIN page is installed, so the suite can cancel from a
+        // deterministic post-index phase instead of a timer. Publishing the
+        // marker through pg_stat_activity makes the park observable from
+        // another session; the loop exits when the cancel lands and the next
+        // source read raises the query-cancel error. The 30-second bound
+        // only fails visibly if no cancellation is ever delivered.
+        #[cfg(feature = "test-hooks")]
+        if fork == MAIN_FORK
+            && metadata.kind == RelationKind::Index
+            && crate::DEBUG_HOLD_BRIN_PAGE_BLOCK.get() >= 0
+            && packet.block
+                == u32::try_from(crate::DEBUG_HOLD_BRIN_PAGE_BLOCK.get()).unwrap_or(u32::MAX)
+            && self
+                .index_ordinal(relation_index, metadata.fork)
+                .and_then(|ordinal| indexes::physical_index(&self.manifest.indexes, ordinal))
+                .is_some_and(|entry| matches!(entry, indexes::IndexTransfer::Brin(_)))
+        {
+            let _ = Spi::get_one_with_args::<String>(
+                "SELECT set_config('application_name', 'pg_pagecopy brin hold', false)",
+                &["pg_pagecopy brin hold".into()],
+            );
+            for _ in 0..3000 {
+                let cancel_pending = unsafe {
+                    std::ptr::read_volatile(std::ptr::addr_of!(pg_sys::QueryCancelPending))
+                };
+                if cancel_pending != 0 {
+                    break;
+                }
+                unsafe { pg_sys::pg_usleep(10_000) };
+            }
+        }
         Ok(())
     }
 

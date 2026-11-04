@@ -534,6 +534,14 @@ pc_log_relation(Relation rel, ForkNumber fork)
     BlockNumber blkno;
     int         npending = 0;
     int         i;
+    /*
+     * BRIN revmap pages keep their entry array between pd_lower and
+     * pd_upper, which standard-page full images omit as a hole; replayed
+     * revmaps would silently read as unsummarized ranges, so every BRIN
+     * main-fork page is logged whole.
+     */
+    bool        page_std = fork == MAIN_FORKNUM &&
+        rel->rd_rel->relam != BRIN_AM_OID;
 
     if (!smgrexists(smgr, fork))
         return;
@@ -553,13 +561,12 @@ pc_log_relation(Relation rel, ForkNumber fork)
         blknos[npending] = blkno;
         if (++npending == XLR_MAX_BLOCK_ID)
         {
-            pc_log_pages(smgr, fork, npending, blknos, pages,
-                         fork == MAIN_FORKNUM);
+            pc_log_pages(smgr, fork, npending, blknos, pages, page_std);
             npending = 0;
         }
     }
     if (npending > 0)
-        pc_log_pages(smgr, fork, npending, blknos, pages, fork == MAIN_FORKNUM);
+        pc_log_pages(smgr, fork, npending, blknos, pages, page_std);
 
     for (i = 0; i < XLR_MAX_BLOCK_ID; i++)
         pfree(pages[i]);

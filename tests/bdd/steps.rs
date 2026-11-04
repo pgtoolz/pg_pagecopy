@@ -3,6 +3,51 @@ use crate::world::AttachWorld;
 use cucumber::{gherkin::Step, given, then, when};
 use std::time::Duration;
 
+const BLOCK_SIZE: usize = 8192;
+/// A revmap page's `rm_tids` array starts right after the 24-byte page
+/// header. The nonzero BRIN page type lives in the page's final halfword,
+/// so the nonempty check must exclude the special space or it would pass on
+/// an all-zero TID array.
+const REVMAP_TID_START: usize = 24;
+/// `MAXALIGN(sizeof(BrinSpecialSpace))`: the revmap TID array ends here.
+const REVMAP_SPECIAL_SIZE: usize = 16;
+/// `BRIN_PAGETYPE_REVMAP`, stored little-endian in the last halfword.
+const BRIN_PAGETYPE_REVMAP: u16 = 0xF092;
+/// Replay always stamps an applied page with the WAL record's LSN, and
+/// `pc_prepare_page` had set LSN 1 on disk, so `pd_lsn` legitimately
+/// differs after recovery. The page checksum covers the page contents
+/// including that LSN, so it legitimately differs too; with checksums
+/// disabled the field is not maintained at all. Every byte after the
+/// checksum field must match.
+const PAGE_HEADER_UNSTABLE_LEN: usize = 10;
+/// `BRIN_PAGETYPE_REGULAR`, the summary pages, stored little-endian in the
+/// last halfword.
+const BRIN_PAGETYPE_REGULAR: u16 = 0xF093;
+
+/// Whether a block is a revmap page whose TID array carries entries: the
+/// BRIN revmap page type is present and some TID byte outside the special
+/// space is nonzero.
+fn revmap_carries_entries(page: &[u8]) -> bool {
+    assert_eq!(page.len(), BLOCK_SIZE);
+    let type_offset = BLOCK_SIZE - 2;
+    let page_type = u16::from_le_bytes([page[type_offset], page[type_offset + 1]]);
+    page_type == BRIN_PAGETYPE_REVMAP
+        && page[REVMAP_TID_START..BLOCK_SIZE - REVMAP_SPECIAL_SIZE]
+            .iter()
+            .any(|byte| *byte != 0)
+}
+
+/// Whether a block is a populated BRIN summary (regular) page: the regular
+/// page type is present and the line pointer array has started past the
+/// page header (`pd_lower`), so at least one summary tuple is stored.
+fn brin_summary_carries_tuples(page: &[u8]) -> bool {
+    assert_eq!(page.len(), BLOCK_SIZE);
+    let type_offset = BLOCK_SIZE - 2;
+    let page_type = u16::from_le_bytes([page[type_offset], page[type_offset + 1]]);
+    let lower = u16::from_le_bytes([page[12], page[13]]) as usize;
+    page_type == BRIN_PAGETYPE_REGULAR && lower > REVMAP_TID_START
+}
+
 #[given("a fresh PostgreSQL pair")]
 async fn fresh_pair(world: &mut AttachWorld) {
     let pair = tokio::time::timeout(Duration::from_secs(60), PostgresPair::start())
@@ -87,6 +132,29 @@ fn checksum_setting(enabled: &str) -> bool {
         "disabled" => false,
         _ => panic!("checksums must be enabled or disabled"),
     }
+}
+
+/// Same-major pair with independent checksum settings, so the
+/// checksum-mismatch regressions run on every configured major.
+#[given(
+    expr = "a fresh PostgreSQL pair with source checksums {string} and target checksums {string}"
+)]
+async fn fresh_pair_mismatched_checksums(
+    world: &mut AttachWorld,
+    source_enabled: String,
+    target_enabled: String,
+) {
+    let pair = tokio::time::timeout(
+        Duration::from_secs(60),
+        PostgresPair::start_with_mismatched_checksums(
+            checksum_setting(&source_enabled),
+            checksum_setting(&target_enabled),
+        ),
+    )
+    .await
+    .expect("PostgreSQL pair startup timed out")
+    .unwrap_or_else(|error| panic!("failed to start PostgreSQL pair: {error}"));
+    world.pair = Some(pair);
 }
 
 #[given(expr = "the following SQL is executed on {string}:")]
@@ -266,7 +334,10 @@ async fn source_writer_is_blocked(world: &mut AttachWorld, step: &Step) {
     // export snapshot predates it, so the row is never copied either way.
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
-        assert!(std::time::Instant::now() < deadline, "writer outcome was not observed");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "writer outcome was not observed"
+        );
         let waiting = pair.query(
             "source",
             "SELECT count(*)::text FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE c.relname = 'events' AND l.mode = 'RowExclusiveLock' AND NOT l.granted",
@@ -379,6 +450,24 @@ async fn cancel_target_import(world: &mut AttachWorld, step: &Step) {
         .unwrap_or_else(|error| panic!("target cancellation failed: {error}"));
 }
 
+#[when(expr = "the following SQL on \"target\" is cancelled after {int} ms:")]
+async fn cancel_target_import_after(world: &mut AttachWorld, delay: u64, step: &Step) {
+    let sql = world.expand_sql(docstring(step));
+    let pair = world.pair.as_ref().expect("PostgreSQL pair is not running");
+    pair.cancel_target(&sql, Duration::from_millis(delay))
+        .await
+        .unwrap_or_else(|error| panic!("target cancellation failed: {error}"));
+}
+
+#[when(expr = "the following SQL on \"target\" is cancelled after the BRIN page milestone:")]
+async fn cancel_target_import_after_brin_milestone(world: &mut AttachWorld, step: &Step) {
+    let sql = world.expand_sql(docstring(step));
+    let pair = world.pair.as_ref().expect("PostgreSQL pair is not running");
+    pair.cancel_target_after_brin_milestone(&sql)
+        .await
+        .unwrap_or_else(|error| panic!("target cancellation failed: {error}"));
+}
+
 #[when(expr = "the following SQL on {string} is interrupted by timeout:")]
 async fn timeout_sql(world: &mut AttachWorld, side: String, step: &Step) {
     let sql = world.expand_sql(docstring(step));
@@ -456,6 +545,100 @@ fn validation_reads(world: &mut AttachWorld, expected_reads: u32, expected_relat
     assert_eq!(reads.iter().sum::<u32>(), expected_reads, "{reads:?}");
 }
 
+async fn record_target_block_checked(
+    world: &mut AttachWorld,
+    relation: String,
+    block: u64,
+    check: fn(&[u8]) -> bool,
+    kind: &str,
+) {
+    let sql = format!("SELECT pg_relation_filepath('{relation}')");
+    let relative = tokio::time::timeout(Duration::from_secs(30), world.query("target", &sql))
+        .await
+        .expect("SQL query timed out")
+        .unwrap_or_else(|error| panic!("query on target failed: {error}\nSQL:\n{sql}"));
+    let pair = world.pair.as_ref().expect("PostgreSQL pair is not started");
+    let path = pair.target_data_path(&relative);
+    assert!(
+        path.exists(),
+        "target data file {} does not exist",
+        path.display()
+    );
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let block = usize::try_from(block).expect("block number fits usize");
+    let start = block * BLOCK_SIZE;
+    let recorded = bytes[start..start + BLOCK_SIZE].to_vec();
+    assert!(
+        check(&recorded),
+        "recorded block {block} of {relation} is not a populated brin {kind} page; \
+         the fixture is too small",
+    );
+    world.recorded_data_file = Some(path);
+    world
+        .recorded_relation_blocks
+        .push((block as u64, recorded));
+}
+
+#[when(expr = "target relation {string} block {int} is recorded")]
+async fn record_target_block(world: &mut AttachWorld, relation: String, block: u64) {
+    record_target_block_checked(world, relation, block, revmap_carries_entries, "revmap").await;
+}
+
+#[when(expr = "target relation {string} block {int} is recorded as a brin {string} page")]
+async fn record_target_brin_page(
+    world: &mut AttachWorld,
+    relation: String,
+    block: u64,
+    kind: String,
+) {
+    let check = match kind.as_str() {
+        "revmap" => revmap_carries_entries,
+        "summary" => brin_summary_carries_tuples,
+        _ => panic!("brin page kind must be revmap or summary, not {kind:?}"),
+    };
+    record_target_block_checked(world, relation, block, check, &kind).await;
+}
+
+#[then("the recorded target block is unchanged after crash recovery")]
+fn recorded_block_survives_recovery(world: &mut AttachWorld) {
+    let path = world
+        .recorded_data_file
+        .clone()
+        .expect("no recorded target data file");
+    let recorded = std::mem::take(&mut world.recorded_relation_blocks);
+    assert!(
+        !recorded.is_empty(),
+        "no recorded target blocks to compare after recovery"
+    );
+    assert!(
+        path.exists(),
+        "recorded data file {} was not rebuilt by WAL recovery",
+        path.display()
+    );
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    for (block, expected) in recorded {
+        let start = usize::try_from(block).expect("block number fits usize") * BLOCK_SIZE;
+        let recovered = &bytes[start + PAGE_HEADER_UNSTABLE_LEN..start + BLOCK_SIZE];
+        assert_eq!(
+            recovered,
+            &expected[PAGE_HEADER_UNSTABLE_LEN..],
+            "crash recovery restored different bytes for block {block}; \
+             revmap or summary contents were lost"
+        );
+    }
+}
+
+#[then("target data checksums verify after a clean shutdown")]
+async fn target_checksums_verify(world: &mut AttachWorld) {
+    let pair = world.pair.as_mut().expect("PostgreSQL pair is not started");
+    tokio::time::timeout(Duration::from_secs(60), pair.verify_target_checksums())
+        .await
+        .expect("checksum verification timed out")
+        .unwrap_or_else(|error| panic!("target checksum verification failed: {error}"));
+}
+
 #[then("source PostgreSQL did not crash")]
 fn source_did_not_crash(world: &mut AttachWorld) {
     let log = world
@@ -477,4 +660,55 @@ fn docstring(step: &Step) -> &str {
     step.docstring
         .as_deref()
         .expect("SQL docstring is required")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{revmap_carries_entries, BLOCK_SIZE, BRIN_PAGETYPE_REVMAP, REVMAP_SPECIAL_SIZE};
+
+    fn revmap_page(page_type: u16, tid_byte: u8) -> [u8; BLOCK_SIZE] {
+        let mut page = [0u8; BLOCK_SIZE];
+        let type_offset = BLOCK_SIZE - 2;
+        page[type_offset..type_offset + 2].copy_from_slice(&page_type.to_le_bytes());
+        page[BLOCK_SIZE - REVMAP_SPECIAL_SIZE - 1] = tid_byte;
+        page
+    }
+
+    #[test]
+    fn a_valid_page_type_with_an_all_zero_tid_array_is_rejected() {
+        // Self-check of the guard the crash scenario relies on: the nonzero
+        // page type sits in the special space, so it must not count as an
+        // entry. A TID byte inside the array makes the page qualify.
+        assert!(!revmap_carries_entries(&revmap_page(
+            BRIN_PAGETYPE_REVMAP,
+            0
+        )));
+        assert!(revmap_carries_entries(&revmap_page(
+            BRIN_PAGETYPE_REVMAP,
+            1
+        )));
+        assert!(!revmap_carries_entries(&revmap_page(0xF093, 1)));
+    }
+
+    fn summary_page(lower: u16) -> [u8; BLOCK_SIZE] {
+        let mut page = [0u8; BLOCK_SIZE];
+        let type_offset = BLOCK_SIZE - 2;
+        page[type_offset..type_offset + 2]
+            .copy_from_slice(&super::BRIN_PAGETYPE_REGULAR.to_le_bytes());
+        page[12..14].copy_from_slice(&lower.to_le_bytes());
+        page
+    }
+
+    #[test]
+    fn a_summary_page_is_recognized_only_with_tuples() {
+        // Self-check for the crash scenarios' summary-page guard: an empty
+        // regular page must not count as a populated summary page.
+        assert!(!super::brin_summary_carries_tuples(&summary_page(0)));
+        assert!(!super::brin_summary_carries_tuples(&summary_page(24)));
+        assert!(super::brin_summary_carries_tuples(&summary_page(32)));
+        assert!(!super::brin_summary_carries_tuples(&revmap_page(
+            BRIN_PAGETYPE_REVMAP,
+            1
+        )));
+    }
 }

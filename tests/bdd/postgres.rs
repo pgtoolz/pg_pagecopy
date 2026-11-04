@@ -24,6 +24,16 @@ impl PostgresPair {
         Self::start_with_options(major, major, checksums, checksums).await
     }
 
+    /// Same-major pair with independent checksum settings, for the BDD
+    /// checksum-mismatch regressions that must run on every configured major.
+    pub async fn start_with_mismatched_checksums(
+        source_checksums: bool,
+        target_checksums: bool,
+    ) -> Result<Self, String> {
+        let major = default_major()?;
+        Self::start_with_options(major, major, source_checksums, target_checksums).await
+    }
+
     pub async fn start_versions(
         source_major: u16,
         target_major: u16,
@@ -149,6 +159,34 @@ impl PostgresPair {
         .await
     }
 
+    pub async fn verify_target_checksums(&mut self) -> Result<(), String> {
+        self.target.stop_clean()?;
+        let data = self.target.data.to_string_lossy().into_owned();
+        let program = pg_program(self.target.major, "pg_checksums");
+        let mut command = if is_root() {
+            let mut command = Command::new("runuser");
+            command.args(["-u", "postgres", "--", &program]);
+            command
+        } else {
+            Command::new(&program)
+        };
+        let output = command
+            .arg("--check")
+            .arg("-D")
+            .arg(&data)
+            .output()
+            .map_err(|error| format!("{program}: {error}"))?;
+        self.target.restart().await?;
+        if !output.status.success() {
+            return Err(format!(
+                "pg_checksums --check failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(())
+    }
+
     pub fn source_log(&self) -> Result<String, String> {
         std::fs::read_to_string(&self.source.log).map_err(|error| error.to_string())
     }
@@ -179,7 +217,15 @@ impl PostgresPair {
     }
 
     pub async fn cancel_target(&self, sql: &str, delay: Duration) -> Result<(), String> {
-        cancel_execute(self.target.port, sql, delay).await
+        cancel_execute(self.target.port, sql, CancelTrigger::Delay(delay)).await
+    }
+
+    /// Cancel a target statement only after the importer's test hook parks at
+    /// the BRIN-page milestone: heap, TOAST and at least one BRIN index page
+    /// are already installed, so the cancellation can no longer land during
+    /// preparation or race a completed import.
+    pub async fn cancel_target_after_brin_milestone(&self, sql: &str) -> Result<(), String> {
+        cancel_execute(self.target.port, sql, CancelTrigger::BrinMilestone).await
     }
 
     pub async fn change_target_owner_during_import(&self, sql: &str) -> Result<(), String> {
@@ -321,6 +367,23 @@ impl Postgres {
         )
     }
 
+    /// Clean shutdown for offline tools (`pg_checksums`) that refuse an
+    /// immediate-stop cluster.
+    fn stop_clean(&self) -> Result<(), String> {
+        run(
+            &pg_program(self.major, "pg_ctl"),
+            &[
+                "-D",
+                &self.data.to_string_lossy(),
+                "-w",
+                "-m",
+                "fast",
+                "stop",
+            ],
+            true,
+        )
+    }
+
     fn crash(&self) -> Result<(), String> {
         let pid = std::fs::read_to_string(self.data.join("postmaster.pid"))
             .map_err(|error| error.to_string())?
@@ -449,21 +512,65 @@ async fn connect(port: u16) -> Result<(Client, tokio::task::JoinHandle<()>), Str
     Ok((client, task))
 }
 
-async fn cancel_execute(port: u16, sql: &str, delay: Duration) -> Result<(), String> {
+/// What must be observed before a cancellation is delivered.
+enum CancelTrigger {
+    Delay(Duration),
+    /// The importing backend published the test-hook milestone through
+    /// `pg_stat_activity`: the first BRIN page is installed and the import is
+    /// parked there waiting for this very cancellation.
+    BrinMilestone,
+}
+
+async fn wait_for_cancel_trigger(port: u16, trigger: &CancelTrigger) {
+    match trigger {
+        CancelTrigger::Delay(delay) => tokio::time::sleep(*delay).await,
+        CancelTrigger::BrinMilestone => {
+            let (client, task) = connect(port).await.expect("milestone poll connect failed");
+            let deadline = std::time::Instant::now() + Duration::from_secs(180);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "import never published the BRIN-page hold milestone"
+                );
+                let seen = client
+                    .simple_query(
+                        "SELECT count(*)::text FROM pg_stat_activity \
+                         WHERE application_name = 'pg_pagecopy brin hold'",
+                    )
+                    .await;
+                if let Ok(messages) = seen {
+                    let parked = messages.iter().any(|message| {
+                        matches!(message, SimpleQueryMessage::Row(row) if row.get(0) == Some("1"))
+                    });
+                    if parked {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            drop(client);
+            let _ = task.await;
+        }
+    }
+}
+
+async fn cancel_execute(port: u16, sql: &str, trigger: CancelTrigger) -> Result<(), String> {
     let (client, task) = connect(port).await?;
     let cancel = client.cancel_token();
     let result = {
         let execution = client.batch_execute(sql);
         tokio::pin!(execution);
+        let wait = wait_for_cancel_trigger(port, &trigger);
+        tokio::pin!(wait);
         tokio::select! {
             result = &mut execution => {
                 return Err(format!("import finished before cancellation: {result:?}"));
             }
-            () = tokio::time::sleep(delay) => {
+            () = &mut wait => {
                 cancel.cancel_query(NoTls).await.map_err(|error| error.to_string())?;
-                tokio::time::timeout(Duration::from_secs(10), execution)
+                tokio::time::timeout(Duration::from_secs(30), execution)
                     .await
-                    .map_err(|_| "cancelled import did not finish within 10 seconds".to_owned())?
+                    .map_err(|_| "cancelled import did not finish within 30 seconds".to_owned())?
             }
         }
     };

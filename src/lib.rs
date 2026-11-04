@@ -10,6 +10,35 @@ use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 static DEBUG_CORRUPT_PAGE: GucSetting<i32> = GucSetting::<i32>::new(-1);
 #[cfg(feature = "test-hooks")]
 static DEBUG_CORRUPT_OFFSET: GucSetting<i32> = GucSetting::<i32>::new(-1);
+/// Debug-only: manifest relation index whose pages the corrupt-page hook
+/// applies to. 0 (the heap) preserves the historical behavior; the BDD suite
+/// raises it to corrupt incoming revmap/summary pages instead.
+#[cfg(feature = "test-hooks")]
+static DEBUG_CORRUPT_PAGE_RELATION: GucSetting<i32> = GucSetting::<i32>::new(0);
+/// Debug-only corruption hook for the BDD suite: flips one byte of block 0
+/// (the metapage) of every incoming index relation before verification,
+/// exercising the per-access-method metapage validators end to end.
+#[cfg(feature = "test-hooks")]
+static DEBUG_CORRUPT_INDEX_METAPAGE: GucSetting<i32> = GucSetting::<i32>::new(-1);
+/// Debug-only: when >= 0, restricts the incoming-metapage corruption hook to
+/// this physical index ordinal, so a later index can fail after an earlier
+/// one has already been written.
+#[cfg(feature = "test-hooks")]
+static DEBUG_CORRUPT_INDEX_ORDINAL: GucSetting<i32> = GucSetting::<i32>::new(-1);
+/// Debug-only: when both are >= 0, the incoming index page packet for this
+/// manifest relation and block number is dropped without installing it, so
+/// the next packet exercises the out-of-order and stream-ended-early
+/// rejection paths.
+#[cfg(feature = "test-hooks")]
+static DEBUG_DROP_INDEX_PAGE_RELATION: GucSetting<i32> = GucSetting::<i32>::new(-1);
+#[cfg(feature = "test-hooks")]
+static DEBUG_DROP_INDEX_PAGE_BLOCK: GucSetting<i32> = GucSetting::<i32>::new(-1);
+/// Debug-only: when >= 0, the importer parks right after installing this
+/// block of a physically transferred BRIN index until the statement is
+/// cancelled, so the BDD suite cancels from a deterministic post-index
+/// phase. -1 disables.
+#[cfg(feature = "test-hooks")]
+static DEBUG_HOLD_BRIN_PAGE_BLOCK: GucSetting<i32> = GucSetting::<i32>::new(-1);
 #[cfg(feature = "test-hooks")]
 static DEBUG_DISABLE_LZ4: GucSetting<bool> = GucSetting::<bool>::new(false);
 /// Progress cadence in pages: 0 disables both `NOTICE`s and `application_name`
@@ -17,6 +46,7 @@ static DEBUG_DISABLE_LZ4: GucSetting<bool> = GucSetting::<bool>::new(false);
 static PROGRESS_PAGES: GucSetting<i32> = GucSetting::<i32>::new(1024);
 
 #[pg_guard]
+#[allow(clippy::too_many_lines)] // Flat GUC registration; no shared state.
 pub extern "C-unwind" fn _PG_init() {
     #[cfg(feature = "test-hooks")]
     {
@@ -37,6 +67,72 @@ pub extern "C-unwind" fn _PG_init() {
             &DEBUG_CORRUPT_OFFSET,
             -1,
             8191,
+            GucContext::Suset,
+            GucFlags::default(),
+        );
+        GucRegistry::define_int_guc(
+            c"pagecopy.debug_corrupt_index_metapage_offset",
+            c"Byte offset to corrupt in incoming index metapages (debug)",
+            c"Flips the byte at this offset of block 0 of every incoming index \
+             relation before metapage verification. -1 disables.",
+            &DEBUG_CORRUPT_INDEX_METAPAGE,
+            -1,
+            8191,
+            GucContext::Suset,
+            GucFlags::default(),
+        );
+        GucRegistry::define_int_guc(
+            c"pagecopy.debug_corrupt_page_relation",
+            c"Manifest relation index for the corrupt-page hook (debug)",
+            c"Applies pagecopy.debug_corrupt_page to this manifest relation index. \
+             0 is the heap; raise it to corrupt incoming index pages instead.",
+            &DEBUG_CORRUPT_PAGE_RELATION,
+            0,
+            i32::MAX,
+            GucContext::Suset,
+            GucFlags::default(),
+        );
+        GucRegistry::define_int_guc(
+            c"pagecopy.debug_corrupt_index_ordinal",
+            c"Physical index ordinal for the metapage corruption hook (debug)",
+            c"When >= 0, restricts pagecopy.debug_corrupt_index_metapage_offset to \
+             this physical index ordinal instead of every incoming index.",
+            &DEBUG_CORRUPT_INDEX_ORDINAL,
+            -1,
+            i32::MAX,
+            GucContext::Suset,
+            GucFlags::default(),
+        );
+        GucRegistry::define_int_guc(
+            c"pagecopy.debug_drop_index_page_relation",
+            c"Manifest relation index whose page to drop (debug)",
+            c"Together with pagecopy.debug_drop_index_page_block, drops this \
+             incoming index page packet without installing it. -1 disables.",
+            &DEBUG_DROP_INDEX_PAGE_RELATION,
+            -1,
+            i32::MAX,
+            GucContext::Suset,
+            GucFlags::default(),
+        );
+        GucRegistry::define_int_guc(
+            c"pagecopy.debug_drop_index_page_block",
+            c"Block number of the incoming index page to drop (debug)",
+            c"Together with pagecopy.debug_drop_index_page_relation, drops this \
+             incoming index page packet without installing it. -1 disables.",
+            &DEBUG_DROP_INDEX_PAGE_BLOCK,
+            -1,
+            i32::MAX,
+            GucContext::Suset,
+            GucFlags::default(),
+        );
+        GucRegistry::define_int_guc(
+            c"pagecopy.debug_hold_brin_page_block",
+            c"BRIN block to hold the import at (debug)",
+            c"Parks the import after installing this block of a physically \
+             transferred BRIN index until the statement is cancelled. -1 disables.",
+            &DEBUG_HOLD_BRIN_PAGE_BLOCK,
+            -1,
+            i32::MAX,
             GucContext::Suset,
             GucFlags::default(),
         );

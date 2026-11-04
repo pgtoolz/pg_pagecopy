@@ -199,7 +199,7 @@ Feature: Constraint-backed and invalid source indexes transfer as invalid defini
       """
       SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE name = 'events_key';
       """
-    And the following SQL on "source" returns "f|error|custom opclasses are not supported; only pg_catalog btree opclasses are allowed":
+    And the following SQL on "source" returns "f|error|custom opclasses are not supported; only core pg_catalog opclasses are allowed":
       """
       SELECT supported, method, detail FROM pagecopy.check('public.events') WHERE name = 'events_custom';
       """

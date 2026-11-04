@@ -33,7 +33,11 @@ ENV PATH="/usr/lib/postgresql/${PG_VERSION}/bin:${PATH}" \
     PG_PAGECOPY_FEATURES=/opt/pg-pagecopy-bdd/features
 COPY --from=build /work/target/release/pg-pagecopy-bdd /usr/local/bin/pg-pagecopy-bdd
 COPY tests/bdd/features /opt/pg-pagecopy-bdd/features
+COPY tests/bdd/features-slow /opt/pg-pagecopy-bdd/features-slow
 COPY tests/bdd/features-release /opt/pg-pagecopy-bdd/features-release
-# Column-level COMPRESSION and LZ4 are unavailable before PostgreSQL 14.
-RUN [ "$PG_VERSION" -ge 14 ] || rm /opt/pg-pagecopy-bdd/features/safety_lz4.feature
+# Column-level COMPRESSION and LZ4 are unavailable before PostgreSQL 14, and
+# bloom/minmax-multi BRIN opclasses do not exist there either.
+RUN [ "$PG_VERSION" -ge 14 ] \
+      || rm /opt/pg-pagecopy-bdd/features/safety_lz4.feature \
+              /opt/pg-pagecopy-bdd/features/brin_modern_opclasses.feature
 CMD ["pg-pagecopy-bdd"]
