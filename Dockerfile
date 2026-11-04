@@ -10,8 +10,14 @@ ARG PG_VERSION
 RUN rustup component add rustfmt clippy
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl gnupg clang libclang-dev pkg-config \
-    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-       | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
+    # postgresql.org intermittently resets HTTP/2 streams; force HTTP/1.1 and
+    # retry so CI does not fail on key fetches (curl 18 / no valid OpenPGP)
+    && for i in 1 2 3 4 5; do \
+         curl --http1.1 -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+           | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
+           && break || sleep $((i * 5)); \
+       done \
+    && test -s /usr/share/keyrings/postgresql.gpg \
     && echo 'deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' \
        > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
