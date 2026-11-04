@@ -55,8 +55,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
-      SOURCE_PG_VERSION: 13
-      TARGET_PG_VERSION: 16
       BUILDER_REGISTRY: ghcr.io/${{ github.repository }}
     steps:
       - name: Check out
@@ -75,7 +73,13 @@ jobs:
           exit 1
 
       - name: Build, lint and run cross-major BDD scenarios
-        run: make bdd PG_SOURCE=${{ matrix.source }} PG_TARGET=${{ matrix.target }}
+        run: |
+          for source in 13 14 15 16 17; do
+            for target in $(seq $((source + 1)) 18); do
+              echo "=== PostgreSQL ${source} -> ${target} ==="
+              make bdd PG_SOURCE="$source" PG_TARGET="$target"
+            done
+          done
 
       - name: Upload cross-major BDD logs
         if: always()
