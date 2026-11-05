@@ -8,13 +8,60 @@ on:
 
 permissions:
   contents: read
-  packages: read
+  packages: write
 
 jobs:
+  builders:
+    name: builder-pg${{ matrix.pg }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [13, 14, 15, 16, 17, 18]
+    env:
+      BUILDER_IMAGE: ghcr.io/${{ github.repository }}/builder-pg${{ matrix.pg }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        run: |
+          for attempt in 1 2 3; do
+            if echo "${{ secrets.GITHUB_TOKEN }}" \
+              | docker login ghcr.io -u '${{ github.actor }}' --password-stdin; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "ghcr login failed after 3 attempts" >&2
+          exit 1
+
+      - name: Publish toolchain image
+        run: |
+          tag=$(cat Dockerfile .github/workflows/images.yml | sha256sum | cut -c1-16)
+          image="$BUILDER_IMAGE:$tag"
+          if docker pull "$image"; then
+            echo "cache image already published"
+            exit 0
+          fi
+          # BUILDKIT_INLINE_CACHE embeds cache metadata so the matrix jobs'
+          # --cache-from actually restores these layers; without it the
+          # image exists but restores zero layers and every run reinstalls
+          # the toolchain from apt.
+          docker build --target toolchain \
+            --cache-from "$image" \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --build-arg PG_VERSION=${{ matrix.pg }} \
+            -t "$image" .
+          docker push "$image" \
+            || echo "push failed (fork PR read-only token?); matrix will build from source"
+
   postgres-matrix:
     name: PostgreSQL ${{ matrix.pg }}
+    needs: [builders]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -54,6 +101,7 @@ jobs:
 
   cross-major-matrix:
     name: PostgreSQL ${{ matrix.source }} -> ${{ matrix.target }}
+    needs: [builders]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
