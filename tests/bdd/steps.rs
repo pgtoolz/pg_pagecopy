@@ -38,6 +38,17 @@ const LH_OVERFLOW_PAGE: u16 = 0x0001;
 const LH_BITMAP_PAGE: u16 = 0x0004;
 /// `LH_META_PAGE`.
 const LH_META_PAGE: u16 = 0x0008;
+/// `MAXALIGN(sizeof(SpGistPageOpaqueData))`: every SP-GiST page ends with
+/// this 8-byte special space on the supported ABIs.
+const SPGIST_SPECIAL_SIZE: usize = 8;
+/// `SPGIST_PAGE_ID`, stored little-endian in the page's final halfword.
+const SPGIST_PAGE_ID: u16 = 0xFF82;
+/// `SPGIST_META` flag of the SP-GiST special space.
+const SPGIST_META: u16 = 0x0001;
+/// `SPGIST_LEAF` flag: tree pages without it are inner pages.
+const SPGIST_LEAF: u16 = 0x0004;
+/// `SPGIST_NULLS` flag, set only on the nulls tree's pages.
+const SPGIST_NULLS: u16 = 0x0008;
 /// `MAXALIGN(sizeof(GinPageOpaqueData))`: every GIN page ends with this
 /// 8-byte special space; GIN carries no page id word.
 const GIN_SPECIAL_SIZE: usize = 8;
@@ -83,6 +94,39 @@ fn hash_page_flag(page: &[u8]) -> u16 {
     assert_eq!(page.len(), BLOCK_SIZE);
     let offset = BLOCK_SIZE - HASH_SPECIAL_SIZE + 12;
     u16::from_le_bytes([page[offset], page[offset + 1]])
+}
+/// An SP-GiST page's `flags` field, little-endian, at the start of the
+/// special space (`SpGistPageOpaqueData.flags`).
+fn spgist_page_flags(page: &[u8]) -> u16 {
+    assert_eq!(page.len(), BLOCK_SIZE);
+    let offset = BLOCK_SIZE - SPGIST_SPECIAL_SIZE;
+    u16::from_le_bytes([page[offset], page[offset + 1]])
+}
+
+/// Whether a block is an SP-GiST page of the given kind with the SP-GiST
+/// page id set, so the special space really is a `SpGistPageOpaqueData`.
+/// Meta, root and nulls pages live at fixed blocks; leaf and inner pages
+/// must carry tuples (`pd_lower` past the page header) so a recorded block
+/// proves real content survived the transfer.
+fn is_spgist_page_kind(page: &[u8], kind: &str) -> bool {
+    assert_eq!(page.len(), BLOCK_SIZE);
+    let id_offset = BLOCK_SIZE - 2;
+    let page_id = u16::from_le_bytes([page[id_offset], page[id_offset + 1]]);
+    if page_id != SPGIST_PAGE_ID {
+        return false;
+    }
+    let flags = spgist_page_flags(page);
+    let lower = u16::from_le_bytes([page[12], page[13]]) as usize;
+    match kind {
+        "meta" => flags == SPGIST_META,
+        "leaf" => flags == SPGIST_LEAF && lower > 24,
+        "inner" => flags == 0 && lower > 24,
+        "nulls" => flags & SPGIST_NULLS != 0 && lower > 24,
+        "empty-nulls" => flags == SPGIST_LEAF | SPGIST_NULLS,
+        _ => panic!(
+            "spgist page kind must be meta, leaf, inner, nulls or empty-nulls, not {kind:?}"
+        ),
+    }
 }
 
 /// Whether a block is a hash page of the given `LH_PAGE_TYPE` kind with the
@@ -708,6 +752,26 @@ async fn record_target_hash_page(
     record_target_block_checked(world, relation, block, check, &kind).await;
 }
 
+#[when(expr = "target relation {string} block {int} is recorded as a spgist {string} page")]
+async fn record_target_spgist_page(
+    world: &mut AttachWorld,
+    relation: String,
+    block: u64,
+    kind: String,
+) {
+    let check: fn(&[u8]) -> bool = match kind.as_str() {
+        "meta" => |page: &[u8]| is_spgist_page_kind(page, "meta"),
+        "leaf" => |page: &[u8]| is_spgist_page_kind(page, "leaf"),
+        "inner" => |page: &[u8]| is_spgist_page_kind(page, "inner"),
+        "nulls" => |page: &[u8]| is_spgist_page_kind(page, "nulls"),
+        "empty-nulls" => |page: &[u8]| is_spgist_page_kind(page, "empty-nulls"),
+        _ => panic!(
+            "spgist page kind must be meta, leaf, inner, nulls or empty-nulls, not {kind:?}"
+        ),
+    };
+    record_target_block_checked(world, relation, block, check, &kind).await;
+}
+
 #[when(expr = "target relation {string} block {int} is recorded as a gin {string} page")]
 async fn record_target_gin_page(
     world: &mut AttachWorld,
@@ -928,11 +992,58 @@ mod tests {
         )));
     }
 
+    fn spgist_page(flags: u16, lower: u16) -> [u8; BLOCK_SIZE] {
+        let mut page = [0u8; BLOCK_SIZE];
+        let id_offset = BLOCK_SIZE - 2;
+        page[id_offset..id_offset + 2].copy_from_slice(&super::SPGIST_PAGE_ID.to_le_bytes());
+        let flag_offset = BLOCK_SIZE - super::SPGIST_SPECIAL_SIZE;
+        page[flag_offset..flag_offset + 2].copy_from_slice(&flags.to_le_bytes());
+        page[12..14].copy_from_slice(&lower.to_le_bytes());
+        page
+    }
+
     fn gin_page(flags: u16, lower: u16) -> [u8; BLOCK_SIZE] {
         let mut page = [0u8; BLOCK_SIZE];
         page[BLOCK_SIZE - 2..BLOCK_SIZE].copy_from_slice(&flags.to_le_bytes());
         page[12..14].copy_from_slice(&lower.to_le_bytes());
         page
+    }
+
+    #[test]
+    fn a_spgist_page_is_recognized_only_with_the_page_id_and_expected_flags() {
+        // Self-check for the spgist crash scenarios: the metapage needs its
+        // exact flag, leaf/inner/nulls pages must carry tuples, and inner
+        // pages are tree pages without the leaf bit.
+        assert!(super::is_spgist_page_kind(
+            &spgist_page(super::SPGIST_META, 92),
+            "meta"
+        ));
+        assert!(!super::is_spgist_page_kind(
+            &spgist_page(super::SPGIST_META | super::SPGIST_LEAF, 92),
+            "meta"
+        ));
+        assert!(super::is_spgist_page_kind(
+            &spgist_page(super::SPGIST_LEAF, 32),
+            "leaf"
+        ));
+        assert!(!super::is_spgist_page_kind(
+            &spgist_page(super::SPGIST_LEAF, 24),
+            "leaf"
+        ));
+        assert!(super::is_spgist_page_kind(&spgist_page(0, 32), "inner"));
+        assert!(!super::is_spgist_page_kind(&spgist_page(0, 24), "inner"));
+        assert!(super::is_spgist_page_kind(
+            &spgist_page(super::SPGIST_LEAF | super::SPGIST_NULLS, 32),
+            "nulls"
+        ));
+        assert!(super::is_spgist_page_kind(
+            &spgist_page(super::SPGIST_LEAF | super::SPGIST_NULLS, 24),
+            "empty-nulls"
+        ));
+        let mut wrong_id = spgist_page(super::SPGIST_LEAF, 32);
+        wrong_id[BLOCK_SIZE - 2] = 0;
+        assert!(!super::is_spgist_page_kind(&wrong_id, "leaf"));
+        assert!(!super::is_spgist_page_kind(&[0u8; BLOCK_SIZE], "meta"));
     }
 
     #[test]

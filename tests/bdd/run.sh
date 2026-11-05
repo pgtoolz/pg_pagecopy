@@ -4,6 +4,10 @@ set -eu
 PG_VERSION=${PG_VERSION:-17}
 SOURCE_PG_VERSION=${SOURCE_PG_VERSION:-$PG_VERSION}
 TARGET_PG_VERSION=${TARGET_PG_VERSION:-$PG_VERSION}
+# Private image-tag suffix (e.g. -spgist): several worktrees of this repo
+# share one docker daemon, so parallel BDD runs must never build or run the
+# same tags. Empty keeps the historical public tags.
+tag_suffix=${PG_PAGECOPY_TAG_SUFFIX:-}
 root=$(CDPATH= cd "$(dirname "$0")/../.." && pwd)
 
 # Prebuilt toolchain cache (see Dockerfile, toolchain stage). The tag is
@@ -44,11 +48,11 @@ if [ "$SOURCE_PG_VERSION" != "$TARGET_PG_VERSION" ]; then
 else
   target=test
   image_tag=dev
-  matrix="$PG_VERSION"
+  matrix="$PG_VERSION${tag_suffix}"
   if [ "${PG_PAGECOPY_RELEASE:-0}" = 1 ]; then
     target=release
     image_tag=release
-    matrix="$PG_VERSION-release"
+    matrix="$PG_VERSION-release${tag_suffix}"
   fi
   build_extension "$PG_VERSION" "$target" "$image_tag"
   docker build -f "$root/tests/bdd/Dockerfile" \

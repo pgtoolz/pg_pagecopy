@@ -2,6 +2,9 @@
 //!
 //! Wire tags: `0` = btree (physical transfer), `1` = invalid
 //! (definition only), `2` = brin (physical transfer), `3` = hash
+//! (physical transfer), `4` = spgist (physical transfer). Existing
+//! manifests must decode identically; the tags are part of the format and
+//! never renumbered.
 //! (physical transfer), `5` = gin (physical transfer). Existing manifests
 //! must decode identically; the tags are part of the format and never
 //! renumbered.
@@ -11,6 +14,7 @@ use super::brin::BrinMetadata;
 use super::btree::BtreeMetadata;
 use super::gin::GinMetadata;
 use super::hash::HashMetadata;
+use super::spgist::SpgistMetadata;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IndexTransfer {
@@ -22,6 +26,7 @@ pub enum IndexTransfer {
     },
     Brin(BrinMetadata),
     Hash(HashMetadata),
+    Spgist(SpgistMetadata),
     Gin(GinMetadata),
 }
 
@@ -55,6 +60,16 @@ pub fn encode_index(out: &mut Vec<u8>, index: &IndexTransfer) -> Result<()> {
             put_string(out, &metadata.shape)?;
             put_u32(out, metadata.hash_version)?;
             put_u32(out, metadata.hash_proc)?;
+        }
+        IndexTransfer::Spgist(metadata) => {
+            out.push(4);
+            put_string(out, &metadata.definition)?;
+            put_string(out, &metadata.shape)?;
+            put_u32(out, metadata.config_proc)?;
+            put_u32(out, metadata.choose_proc)?;
+            put_u32(out, metadata.picksplit_proc)?;
+            put_u32(out, metadata.inner_consistent_proc)?;
+            put_u32(out, metadata.leaf_consistent_proc)?;
         }
         IndexTransfer::Gin(metadata) => {
             out.push(5);
@@ -93,6 +108,15 @@ pub fn decode_index(decoder: &mut Decoder<'_>) -> Result<IndexTransfer> {
             shape: decoder.string()?,
             hash_version: decoder.u32()?,
             hash_proc: decoder.u32()?,
+        }),
+        4 => IndexTransfer::Spgist(SpgistMetadata {
+            definition: decoder.string()?,
+            shape: decoder.string()?,
+            config_proc: decoder.u32()?,
+            choose_proc: decoder.u32()?,
+            picksplit_proc: decoder.u32()?,
+            inner_consistent_proc: decoder.u32()?,
+            leaf_consistent_proc: decoder.u32()?,
         }),
         5 => IndexTransfer::Gin(GinMetadata {
             definition: decoder.string()?,
@@ -136,6 +160,18 @@ mod tests {
         }
     }
 
+    fn spgist() -> SpgistMetadata {
+        SpgistMetadata {
+            definition: "spgist (p)".into(),
+            shape: "1|1|f|f|1|0|pg_catalog.quad_point_ops|".into(),
+            config_proc: 4018,
+            choose_proc: 4019,
+            picksplit_proc: 4020,
+            inner_consistent_proc: 4021,
+            leaf_consistent_proc: 4022,
+        }
+    }
+
     fn gin() -> GinMetadata {
         GinMetadata {
             definition: "gin (tags)".into(),
@@ -154,6 +190,7 @@ mod tests {
             },
             IndexTransfer::Brin(brin()),
             IndexTransfer::Hash(hash()),
+            IndexTransfer::Spgist(spgist()),
             IndexTransfer::Gin(gin()),
         ];
         for entry in entries {
@@ -164,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_tags_stay_zero_one_two_three_five_for_btree_invalid_brin_hash_and_gin() {
+    fn wire_tags_keep_their_stable_values() {
         // Existing manifests carry these tag bytes; renumbering would strand them.
         let mut out = Vec::new();
         encode_index(&mut out, &IndexTransfer::Btree(btree())).unwrap();
@@ -186,9 +223,12 @@ mod tests {
         encode_index(&mut out, &IndexTransfer::Hash(hash())).unwrap();
         assert_eq!(out[0], 3);
         let mut out = Vec::new();
+        encode_index(&mut out, &IndexTransfer::Spgist(spgist())).unwrap();
+        assert_eq!(out[0], 4);
+        let mut out = Vec::new();
         encode_index(&mut out, &IndexTransfer::Gin(gin())).unwrap();
         assert_eq!(out[0], 5);
-        for kind in [4, 6] {
+        for kind in [6, 7] {
             assert!(
                 decode_index(&mut Decoder::new(&[kind])).is_err(),
                 "unknown index transfer kind {kind}"
@@ -252,6 +292,22 @@ mod tests {
         expected.extend_from_slice(shape);
         expected.extend_from_slice(&4u32.to_be_bytes());
         expected.extend_from_slice(&451u32.to_be_bytes());
+        assert_eq!(out, expected);
+
+        let mut out = Vec::new();
+        encode_index(&mut out, &IndexTransfer::Spgist(spgist())).unwrap();
+        let definition = b"spgist (p)";
+        let shape = b"1|1|f|f|1|0|pg_catalog.quad_point_ops|";
+        let mut expected = vec![4u8];
+        expected.extend_from_slice(&(u32::try_from(definition.len()).unwrap()).to_be_bytes());
+        expected.extend_from_slice(definition);
+        expected.extend_from_slice(&(u32::try_from(shape.len()).unwrap()).to_be_bytes());
+        expected.extend_from_slice(shape);
+        expected.extend_from_slice(&4018u32.to_be_bytes());
+        expected.extend_from_slice(&4019u32.to_be_bytes());
+        expected.extend_from_slice(&4020u32.to_be_bytes());
+        expected.extend_from_slice(&4021u32.to_be_bytes());
+        expected.extend_from_slice(&4022u32.to_be_bytes());
         assert_eq!(out, expected);
 
         let mut out = Vec::new();

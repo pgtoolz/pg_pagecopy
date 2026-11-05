@@ -1,6 +1,11 @@
 # Index layout for contributors
 
 Index transfer is a static, exhaustive match over the `IndexTransfer` enum —
+there is no registry, no plugin hook and no runtime AM discovery. Four
+access methods transfer physically today: B-tree, BRIN, HASH and SP-GiST,
+each with its own narrow approved-opclass whitelist. Every other access
+method (GiST, GIN, …), and every index of a supported method outside its
+whitelist, degrades to an invalid definition.
 there is no registry, no plugin hook and no runtime AM discovery. The
 access methods that transfer physically today are B-tree, BRIN, hash and
 GIN, each behind a narrow whitelist of exact core opclass/type pairs
@@ -13,6 +18,11 @@ an invalid definition.
 - `src/pg_pagecopy/indexes/{mod,catalog,wire}.rs` — the AM-agnostic core:
   classification and degradation of source indexes, matching against target
   indexes, and the manifest index entries (wire tags `0` = btree, `1` =
+  invalid, `2` = brin, `3` = hash, `4` = spgist; never renumbered —
+  existing manifests must decode identically).
+- `src/pg_pagecopy/indexes/{btree,brin,hash,spgist}.rs` — the per-AM modules:
+  metadata layout comparison, metapage verification and the FFI into
+  `src/index_<am>.c`. Access-method specifics live there and nowhere else.
   invalid, `2` = brin, `3` = hash, `5` = gin; never renumbered — existing
   manifests must decode identically).
 - `src/pg_pagecopy/indexes/btree.rs` — the B-tree module: metadata layout
@@ -28,7 +38,7 @@ an invalid definition.
 The byte-level guard tests in `indexes/wire.rs` and `wire.rs` pin this wire
 contract; a format change must fail there, not in a cross-version transfer.
 
-Adding a future access method (none exists yet) means, in order:
+Adding a future access method means, in order:
 
 1. a new `IndexTransfer` variant in `indexes/wire.rs` with the next free wire
    tag in `encode_index`/`decode_index` (never renumber existing tags);
