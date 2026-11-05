@@ -11,15 +11,15 @@ Feature: Non-btree indexes degrade and rebuild across major versions
       """
       CREATE EXTENSION pg_pagecopy;
       CREATE TABLE public.events (
-        id integer PRIMARY KEY, tags integer[], loc point, payload text
+        id integer PRIMARY KEY, tags integer[], area box, payload text
       );
       CREATE INDEX events_hash ON public.events USING hash (payload);
       CREATE INDEX events_gin ON public.events USING gin (tags);
+      CREATE INDEX events_gist ON public.events USING gist (area);
       CREATE INDEX events_gin_expr ON public.events USING gin (to_tsvector('simple', payload));
-      CREATE INDEX events_gist ON public.events USING gist (loc);
       CREATE INDEX events_brin ON public.events USING brin (payload);
       INSERT INTO public.events
-      SELECT i, ARRAY[i, i + 1], point(i, i), 'row-' || i
+      SELECT i, ARRAY[i, i + 1], box(point(i, i), point(i + 1, i + 1)), 'row-' || i
       FROM generate_series(1, 20) AS i;
       """
     And the following SQL is executed on "target":

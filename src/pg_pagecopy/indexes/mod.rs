@@ -3,12 +3,13 @@
 //! index entries of the manifest wire format. Transfer variants dispatch
 //! through exhaustive matches over [`wire::IndexTransfer`], never runtime
 //! registration; access-method specifics live in [`btree`], [`brin`],
-//! [`gin`], [`hash`] and [`spgist`].
+//! [`gin`], [`gist`], [`hash`] and [`spgist`].
 
 mod brin;
 mod btree;
 mod catalog;
 mod gin;
+mod gist;
 mod hash;
 mod spgist;
 pub mod wire;
@@ -21,6 +22,7 @@ pub use catalog::{
     verify_toast_layout, ClassifyIndex,
 };
 pub use gin::GinMetadata;
+pub use gist::GistMetadata;
 pub use hash::HashMetadata;
 pub use spgist::SpgistMetadata;
 pub use wire::IndexTransfer;

@@ -480,6 +480,7 @@ impl ImportState {
                         entry,
                         indexes::IndexTransfer::Brin(_)
                             | indexes::IndexTransfer::Hash(_)
+                            | indexes::IndexTransfer::Gist(_)
                             | indexes::IndexTransfer::Spgist(_)
                             | indexes::IndexTransfer::Gin(_)
                     )

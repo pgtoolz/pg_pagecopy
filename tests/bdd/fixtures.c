@@ -23,6 +23,7 @@ PG_FUNCTION_INFO_V1(pc_test_corrupt_index_byte);
 PG_FUNCTION_INFO_V1(pc_test_set_index_byte);
 PG_FUNCTION_INFO_V1(pc_test_zero_index_page);
 PG_FUNCTION_INFO_V1(pc_test_corrupt_index_page);
+PG_FUNCTION_INFO_V1(pc_test_gist_deleted_horizon);
 
 Datum
 pc_test_empty_index_state(PG_FUNCTION_ARGS)
@@ -267,4 +268,49 @@ pc_test_legacy_xmin(PG_FUNCTION_ARGS)
     UnlockReleaseBuffer(buffer);
     table_close(rel, NoLock);
     PG_RETURN_VOID();
+}
+
+
+/*
+ * Return the full deletion horizon (deleteXid.value) of the first deleted
+ * GiST page in the index, or -1 when no deleted page exists. Used to prove
+ * that a transfer normalizes the horizon a source VACUUM stamped onto
+ * empty pages: header-only gist.h macros need no extension symbols.
+ */
+#include "access/gist.h"
+#include "storage/bufmgr.h"
+Datum
+pc_test_gist_deleted_horizon(PG_FUNCTION_ARGS)
+{
+    Oid         index_oid = PG_GETARG_OID(0);
+    Relation    index_rel;
+    BlockNumber nblocks;
+    BlockNumber blkno;
+
+    if (!superuser())
+        elog(ERROR, "deleted-page fixture requires superuser");
+    index_rel = index_open(index_oid, AccessShareLock);
+    if (index_rel->rd_rel->relkind != RELKIND_INDEX)
+        elog(ERROR, "deleted-page fixture requires an index");
+    nblocks = RelationGetNumberOfBlocks(index_rel);
+    for (blkno = 0; blkno < nblocks; blkno++)
+    {
+        Buffer  buffer;
+        Page    page;
+
+        buffer = ReadBuffer(index_rel, blkno);
+        LockBuffer(buffer, BUFFER_LOCK_SHARE);
+        page = BufferGetPage(buffer);
+        if (!PageIsNew(page) && GistPageIsDeleted(page))
+        {
+            uint64  horizon = GistPageGetDeleteXid(page).value;
+
+            UnlockReleaseBuffer(buffer);
+            index_close(index_rel, NoLock);
+            PG_RETURN_INT64((int64) horizon);
+        }
+        UnlockReleaseBuffer(buffer);
+    }
+    index_close(index_rel, NoLock);
+    PG_RETURN_INT64(-1);
 }

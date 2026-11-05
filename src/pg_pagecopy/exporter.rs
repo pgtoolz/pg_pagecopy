@@ -660,7 +660,11 @@ impl ExportState {
                         self.local,
                     ),
                     RelationKind::Index => {
-                        Rel::prepare_page(self.block, &mut page, self.manifest.target_checksums);
+                        relation.prepare_index_page(
+                            self.block,
+                            &mut page,
+                            self.manifest.target_checksums,
+                        );
                     }
                 }
             } else {

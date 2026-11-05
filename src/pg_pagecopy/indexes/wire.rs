@@ -2,6 +2,9 @@
 //!
 //! Wire tags: `0` = btree (physical transfer), `1` = invalid
 //! (definition only), `2` = brin (physical transfer), `3` = hash
+//! (physical transfer), `6` = gist (physical transfer). Existing
+//! manifests must decode identically; the tags are part of the format and
+//! never renumbered.
 //! (physical transfer), `4` = spgist (physical transfer). Existing
 //! manifests must decode identically; the tags are part of the format and
 //! never renumbered.
@@ -13,6 +16,7 @@ use super::super::wire::{put_string, put_u32, Decoder, Result, WireError};
 use super::brin::BrinMetadata;
 use super::btree::BtreeMetadata;
 use super::gin::GinMetadata;
+use super::gist::GistMetadata;
 use super::hash::HashMetadata;
 use super::spgist::SpgistMetadata;
 
@@ -26,6 +30,7 @@ pub enum IndexTransfer {
     },
     Brin(BrinMetadata),
     Hash(HashMetadata),
+    Gist(GistMetadata),
     Spgist(SpgistMetadata),
     Gin(GinMetadata),
 }
@@ -60,6 +65,12 @@ pub fn encode_index(out: &mut Vec<u8>, index: &IndexTransfer) -> Result<()> {
             put_string(out, &metadata.shape)?;
             put_u32(out, metadata.hash_version)?;
             put_u32(out, metadata.hash_proc)?;
+        }
+        IndexTransfer::Gist(metadata) => {
+            out.push(6);
+            put_string(out, &metadata.definition)?;
+            put_string(out, &metadata.shape)?;
+            put_string(out, &metadata.procs)?;
         }
         IndexTransfer::Spgist(metadata) => {
             out.push(4);
@@ -108,6 +119,11 @@ pub fn decode_index(decoder: &mut Decoder<'_>) -> Result<IndexTransfer> {
             shape: decoder.string()?,
             hash_version: decoder.u32()?,
             hash_proc: decoder.u32()?,
+        }),
+        6 => IndexTransfer::Gist(GistMetadata {
+            definition: decoder.string()?,
+            shape: decoder.string()?,
+            procs: decoder.string()?,
         }),
         4 => IndexTransfer::Spgist(SpgistMetadata {
             definition: decoder.string()?,
@@ -160,6 +176,14 @@ mod tests {
         }
     }
 
+    fn gist() -> GistMetadata {
+        GistMetadata {
+            definition: "gist (loc)".into(),
+            shape: "1|1|f|f|1|0|pg_catalog.point_ops|".into(),
+            procs: "1:3295,2:3290".into(),
+        }
+    }
+
     fn spgist() -> SpgistMetadata {
         SpgistMetadata {
             definition: "spgist (p)".into(),
@@ -190,6 +214,7 @@ mod tests {
             },
             IndexTransfer::Brin(brin()),
             IndexTransfer::Hash(hash()),
+            IndexTransfer::Gist(gist()),
             IndexTransfer::Spgist(spgist()),
             IndexTransfer::Gin(gin()),
         ];
@@ -228,7 +253,10 @@ mod tests {
         let mut out = Vec::new();
         encode_index(&mut out, &IndexTransfer::Gin(gin())).unwrap();
         assert_eq!(out[0], 5);
-        for kind in [6, 7] {
+        let mut out = Vec::new();
+        encode_index(&mut out, &IndexTransfer::Gist(gist())).unwrap();
+        assert_eq!(out[0], 6);
+        for kind in [7, 8] {
             assert!(
                 decode_index(&mut Decoder::new(&[kind])).is_err(),
                 "unknown index transfer kind {kind}"
@@ -292,6 +320,20 @@ mod tests {
         expected.extend_from_slice(shape);
         expected.extend_from_slice(&4u32.to_be_bytes());
         expected.extend_from_slice(&451u32.to_be_bytes());
+        assert_eq!(out, expected);
+
+        let mut out = Vec::new();
+        encode_index(&mut out, &IndexTransfer::Gist(gist())).unwrap();
+        let definition = b"gist (loc)";
+        let shape = b"1|1|f|f|1|0|pg_catalog.point_ops|";
+        let procs = b"1:3295,2:3290";
+        let mut expected = vec![6u8];
+        expected.extend_from_slice(&(u32::try_from(definition.len()).unwrap()).to_be_bytes());
+        expected.extend_from_slice(definition);
+        expected.extend_from_slice(&(u32::try_from(shape.len()).unwrap()).to_be_bytes());
+        expected.extend_from_slice(shape);
+        expected.extend_from_slice(&(u32::try_from(procs.len()).unwrap()).to_be_bytes());
+        expected.extend_from_slice(procs);
         assert_eq!(out, expected);
 
         let mut out = Vec::new();
