@@ -243,3 +243,57 @@ Feature: Unapproved GIST indexes degrade while custom opclasses fail
       """
       SELECT count(*) FROM pg_tables WHERE tablename = 'nums';
       """
+
+
+  Scenario: Deleted-page horizons are normalized during GiST preparation
+    Given a fresh PostgreSQL pair
+    And the following SQL is executed on "source":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.t (id integer PRIMARY KEY, p point);
+      CREATE INDEX t_p ON public.t USING gist (p);
+      INSERT INTO public.t SELECT i, point(i, i)
+      FROM generate_series(1, 2000) AS i;
+      DELETE FROM public.t WHERE id <= 1500;
+      """
+    And the following SQL is executed on "source":
+      """
+      VACUUM public.t;
+      """
+    And the following SQL is executed on "source":
+      """
+      CREATE FUNCTION pc_test_gist_deleted_horizon(regclass)
+        RETURNS bigint AS 'pc_bdd_fixtures', 'pc_test_gist_deleted_horizon'
+        LANGUAGE C STRICT;
+      """
+    Then the following SQL on "source" returns "t|0|nonnegative":
+      """
+      SELECT true,
+             CASE WHEN pc_test_gist_deleted_horizon('public.t_p') = -1
+                  THEN -1 ELSE 0 END,
+             CASE WHEN pc_test_gist_deleted_horizon('public.t_p') >= 0
+                  THEN 'nonnegative' ELSE 'negative' END
+      """
+    Given the following SQL is executed on "target":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.t (id integer PRIMARY KEY, p point);
+      CREATE INDEX t_p ON public.t USING gist (p);
+      INSERT INTO public.t VALUES (9999, point(9999, 9999));
+      CREATE FUNCTION pc_test_gist_deleted_horizon(regclass)
+        RETURNS bigint AS 'pc_bdd_fixtures', 'pc_test_gist_deleted_horizon'
+        LANGUAGE C STRICT;
+      """
+    When the following SQL is executed on "target":
+      """
+      SELECT pagecopy.pull(
+        'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
+        'public.t', 'public.t', true
+      );
+      """
+    Then the following SQL on "target" returns "3":
+      """
+      SELECT CASE WHEN pc_test_gist_deleted_horizon('public.t_p') = -1
+                  THEN -1
+                  ELSE pc_test_gist_deleted_horizon('public.t_p') END;
+      """
