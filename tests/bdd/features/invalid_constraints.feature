@@ -1,7 +1,8 @@
 @invalid_constraints
 Feature: Constraint-backed and invalid source indexes transfer as invalid definitions
 
-  Any source index that is not transferred physically (hash/GiST/GIN/BRIN/SP-GiST,
+  Any source index that is not transferred physically (GiST/GIN, unapproved
+  hash/BRIN/SP-GiST opclasses,
   invalid on source, exclusion, primary key or unique constraint) is recreated on
   the target from its definition with indisvalid=false and indisready=false.
   Uniqueness and exclusion are not enforced until REINDEX. Custom opclasses stay

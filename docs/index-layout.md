@@ -1,20 +1,25 @@
 # Index layout for contributors
 
 Index transfer is a static, exhaustive match over the `IndexTransfer` enum —
-there is no registry, no plugin hook and no runtime AM discovery. Exactly
-four access methods transfer physically today: B-tree, BRIN, HASH and GiST.
-Every other access method (GIN, SP-GiST, …) degrades to an invalid
-definition.
+there is no registry, no plugin hook and no runtime AM discovery. Six
+access methods transfer physically today — B-tree, BRIN, HASH, SP-GiST,
+GIN and GiST — each behind a narrow whitelist of exact core opclass/type
+pairs (B-tree: any `pg_catalog` opclass including partial and expression
+forms; BRIN: fixed-width minmax; hash: int2/int4/int8; SP-GiST:
+`quad_point_ops`/`kd_point_ops` on `point`; GIN: `array_ops` on `int[]`
+and `jsonb_ops` on `jsonb`, plain single-column keys; GiST: `point_ops`
+on `point`). Every other index (off-whitelist opclasses, multicolumn
+keys, …) degrades to an invalid definition.
 
 - `src/pg_pagecopy/indexes/{mod,catalog,wire}.rs` — the AM-agnostic core:
   classification and degradation of source indexes, matching against target
   indexes, and the manifest index entries (wire tags `0` = btree, `1` =
-  invalid, `2` = brin, `3` = hash, `6` = gist; never renumbered — existing
-  manifests must decode identically).
-- `src/pg_pagecopy/indexes/{btree,brin,hash,gist}.rs` — one module per
-  access method: metadata layout comparison, metapage/root verification and
-  the FFI into `src/index_<am>.c`. Access-method specifics live in these
-  modules and nowhere else.
+  invalid, `2` = brin, `3` = hash, `4` = spgist, `5` = gin, `6` = gist;
+  never renumbered — existing manifests must decode identically).
+- `src/pg_pagecopy/indexes/{btree,brin,hash,spgist,gin,gist}.rs` — one
+  module per access method: metadata layout comparison, metapage or root
+  verification and the FFI into `src/index_<am>.c`. Access-method
+  specifics live in these modules and nowhere else.
 - `src/pg_pagecopy/exporter.rs` / `importer.rs` — generic transport: they
   dispatch over `IndexTransfer` and never interpret AM-specific fields.
   Page preparation is the one AM-aware exception: `Rel::prepare_index_page`
@@ -36,6 +41,7 @@ The byte-level guard tests in `indexes/wire.rs` and `wire.rs` pin this wire
 contract; a format change must fail there, not in a cross-version transfer.
 
 Adding a future access method (e.g. GIN or SP-GiST) means, in order:
+Adding a future access method means, in order:
 
 1. a new `IndexTransfer` variant in `indexes/wire.rs` with the next free wire
    tag in `encode_index`/`decode_index` (never renumber existing tags);

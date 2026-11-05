@@ -16,6 +16,8 @@ fn main() {
     println!("cargo:rerun-if-changed=src/index_brin.c");
     println!("cargo:rerun-if-changed=src/index_hash.c");
     println!("cargo:rerun-if-changed=src/index_gist.c");
+    println!("cargo:rerun-if-changed=src/index_spgist.c");
+    println!("cargo:rerun-if-changed=src/index_gin.c");
     println!("cargo:rerun-if-env-changed=PGRX_PG_CONFIG_PATH");
     println!("cargo:rerun-if-env-changed=PG_CONFIG");
 
@@ -28,6 +30,8 @@ fn main() {
         .file("src/index_brin.c")
         .file("src/index_hash.c")
         .file("src/index_gist.c")
+        .file("src/index_spgist.c")
+        .file("src/index_gin.c")
         .include(pg_config(&program, "--includedir-server"))
         .include(pg_config(&program, "--includedir"))
         .debug(true)

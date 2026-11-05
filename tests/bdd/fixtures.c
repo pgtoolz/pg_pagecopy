@@ -20,6 +20,7 @@ PG_FUNCTION_INFO_V1(pc_test_legacy_xmin);
 PG_FUNCTION_INFO_V1(pc_test_corrupt_page);
 PG_FUNCTION_INFO_V1(pc_test_empty_index_state);
 PG_FUNCTION_INFO_V1(pc_test_corrupt_index_byte);
+PG_FUNCTION_INFO_V1(pc_test_set_index_byte);
 PG_FUNCTION_INFO_V1(pc_test_zero_index_page);
 PG_FUNCTION_INFO_V1(pc_test_corrupt_index_page);
 
@@ -113,6 +114,42 @@ pc_test_corrupt_index_byte(PG_FUNCTION_ARGS)
     LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
     page = BufferGetPage(buffer);
     page[offset] ^= 0xFF;
+    MarkBufferDirty(buffer);
+    UnlockReleaseBuffer(buffer);
+    index_close(index_rel, NoLock);
+    CommandCounterIncrement();
+    PG_RETURN_VOID();
+}
+
+/*
+ * Set one byte of an index page to an exact value (pc_test_corrupt_index_byte
+ * only flips bits), for fixtures that need a precise field value such as a
+ * reserved block number. Same buffer-manager caveats apply.
+ */
+Datum
+pc_test_set_index_byte(PG_FUNCTION_ARGS)
+{
+    Relation index_rel;
+    Buffer buffer;
+    Page page;
+    BlockNumber blkno;
+    int offset;
+    int value;
+
+    if (!superuser())
+        elog(ERROR, "index corruption fixture requires superuser");
+    index_rel = index_open(PG_GETARG_OID(0), AccessExclusiveLock);
+    if (index_rel->rd_rel->relkind != RELKIND_INDEX)
+        elog(ERROR, "index corruption fixture requires an index");
+    blkno = PG_GETARG_INT32(1);
+    offset = PG_GETARG_INT32(2);
+    value = PG_GETARG_INT32(3);
+    if (blkno >= RelationGetNumberOfBlocks(index_rel) || offset < 0 || offset >= BLCKSZ)
+        elog(ERROR, "index corruption fixture requires an existing byte in the relation");
+    buffer = ReadBuffer(index_rel, blkno);
+    LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+    page = BufferGetPage(buffer);
+    page[offset] = (unsigned char) value;
     MarkBufferDirty(buffer);
     UnlockReleaseBuffer(buffer);
     index_close(index_rel, NoLock);
