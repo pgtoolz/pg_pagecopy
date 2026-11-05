@@ -1,7 +1,8 @@
 @cross-major @gist
 Feature: Approved GIST indexes transfer across major upgrades
 
-  The core point_ops key format (the 16-byte point and its box unions)
+  The core point_ops key format (fixed-size `box` storage: leaf keys are a
+  `BOX` with `high == low == point`, internal keys are `BOX` unions)
   has been stable across PostgreSQL 13-18, and every source support
   procedure must resolve to the same function OID on the target, so the
   approved pairs cross every upward combination as page images.

@@ -8,8 +8,9 @@ pairs (B-tree: any `pg_catalog` opclass including partial and expression
 forms; BRIN: fixed-width minmax; hash: int2/int4/int8; SP-GiST:
 `quad_point_ops`/`kd_point_ops` on `point`; GIN: `array_ops` on `int[]`
 and `jsonb_ops` on `jsonb`, plain single-column keys; GiST: `point_ops`
-on `point`). Every other index (off-whitelist opclasses, multicolumn
-keys, …) degrades to an invalid definition.
+on `point`). Every other index — off-whitelist opclasses of those methods,
+  or multicolumn/INCLUDE forms outside the B-tree — degrades to an invalid
+definition.
 
 - `src/pg_pagecopy/indexes/{mod,catalog,wire}.rs` — the AM-agnostic core:
   classification and degradation of source indexes, matching against target
@@ -40,7 +41,6 @@ works.
 The byte-level guard tests in `indexes/wire.rs` and `wire.rs` pin this wire
 contract; a format change must fail there, not in a cross-version transfer.
 
-Adding a future access method (e.g. GIN or SP-GiST) means, in order:
 Adding a future access method means, in order:
 
 1. a new `IndexTransfer` variant in `indexes/wire.rs` with the next free wire

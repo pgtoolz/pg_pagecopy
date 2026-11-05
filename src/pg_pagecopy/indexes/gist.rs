@@ -28,8 +28,8 @@ fn proc_pairs(procs: &str) -> Vec<&str> {
 impl GistMetadata {
     /// `self` is the source and `other` the target: the target must resolve
     /// every source support procedure to the same function OID. A newer
-    /// major may add procedures (`GiST` sortsupport arrived in 17); extra
-    /// target procedures never interpret transferred pages.
+    /// major may add procedures (`GiST` point sortsupport arrived in 14);
+    /// extra target procedures never interpret transferred pages.
     pub fn has_same_physical_layout(&self, other: &Self) -> bool {
         self.definition == other.definition
             && self.shape == other.shape
@@ -46,12 +46,14 @@ unsafe extern "C" {
 
 /// Exact core opclass and indexed-type pairs that transfer as page images.
 /// `point_ops` on `point` is the one core `GiST` opclass whose page keys are
-/// the fixed 16-byte `point` and its `box` unions, produced by the same
-/// functions on every supported major. Every other `GiST` index (the other
-/// core opclasses whose key encodings were never audited across majors,
-/// expressions, partials) stays on the degraded definition-only path;
-/// custom opclasses, including contrib extension ones like `btree_gist`,
-/// remain a hard error.
+/// fixed-size `box` storage on every supported major — `gist_point_compress`
+/// stores each leaf key as a `BOX` with `high == low == point`, and internal
+/// keys are `BOX` unions — produced by the same functions on every
+/// supported major. Every other `GiST` index (the other core opclasses
+/// whose key encodings were never audited across majors, multicolumn or
+/// INCLUDE forms, expressions, partials) stays on the degraded
+/// definition-only path; custom opclasses, including contrib extension
+/// ones like `btree_gist`, remain a hard error.
 const APPROVED_GIST: [(&str, pg_sys::Oid); 1] = [("point_ops", pg_sys::POINTOID)];
 
 /// Reject `GiST` indexes whose key is not one plain column of the approved
@@ -142,7 +144,17 @@ fn ensure_approved_gist(index_oid: pg_sys::Oid) -> Result<(), String> {
             }
             keys += 1;
         }
-        if keys != key_count || key_count != 1 || total_count != 1 {
+        if total_count != key_count {
+            return Ok::<_, String>(Err(
+                "gist physical transfer requires one key column and no INCLUDE columns".into(),
+            ));
+        }
+        if key_count != 1 {
+            return Ok::<_, String>(Err(
+                "gist physical transfer requires a single key column".into()
+            ));
+        }
+        if keys != key_count {
             return Ok::<_, String>(Err(
                 "gist expression or partial indexes are not transferred".into(),
             ));

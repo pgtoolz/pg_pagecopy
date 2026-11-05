@@ -28,7 +28,17 @@ static bool
 pc_gist_page_ok(Page page, const char **detail)
 {
     GISTPageOpaque opaque;
+    PageHeader phdr = (PageHeader) page;
 
+    /* Bind pd_special to the absolute BLCKSZ-based offset before any
+     * special-area dereference: the size check alone derives from the
+     * header-advertised page size and can pass while the special area
+     * sits outside this buffer on a malformed header. */
+    if (phdr->pd_special != BLCKSZ - MAXALIGN(sizeof(GISTPageOpaqueData)))
+    {
+        *detail = "gist page has an unexpected special area";
+        return false;
+    }
     if (PageGetSpecialSize(page) != MAXALIGN(sizeof(GISTPageOpaqueData)))
     {
         *detail = "gist page has an unexpected special area";
@@ -127,6 +137,25 @@ pc_prepare_gist_page(Page page, BlockNumber blkno, bool checksums)
     if (!pc_gist_page_ok(page, &detail))
         elog(ERROR, "pg_pagecopy: %s", detail);
     GistPageSetNSN(page, GistBuildLSN);
+#if PG_VERSION_NUM >= 140000
+    /* A deleted page's deleteXid is a FullTransactionId of the SOURCE
+     * cluster; if the source horizon is ahead of the target's, vacuum
+     * would consider the page not-yet-recyclable until the target's epoch
+     * catches up, so normalize it to the oldest possible value. The page
+     * is empty either way; no source scan can survive the transfer. */
+    if (((GISTPageOpaque) PageGetSpecialPointer(page))->flags & F_DELETED)
+    {
+        GISTDeletedPageContents *contents =
+            (GISTDeletedPageContents *) PageGetContents(page);
+
+        contents->deleteXid.value = (uint64) FirstNormalTransactionId;
+    }
+#else
+    /* PG13 stores the deletion xid in pd_prune_xid; normalize it the same
+     * way so a leading source horizon cannot pin deleted pages. */
+    if (((GISTPageOpaque) PageGetSpecialPointer(page))->flags & F_DELETED)
+        ((PageHeader) page)->pd_prune_xid = FirstNormalTransactionId;
+#endif
     pc_prepare_page(page, blkno, checksums);
 }
 

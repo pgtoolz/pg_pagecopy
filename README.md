@@ -201,22 +201,15 @@ Example output:
   connect; compatible results pass these physical limits automatically.
 - Heap tables only: no partitions, foreign or unlogged tables, downgrades,
   differing checksum modes.
-- Valid, ready btree indexes (`pg_catalog` opclasses, partial and expression
-  variants) are copied as pages, as are BRIN indexes on the core fixed-width
-  minmax opclasses, HASH indexes on the core int opclasses and GiST indexes
-  on the core `point_ops` opclass of `point`; every other index — other
-  BRIN/HASH/GiST opclasses, GIN, SP-GiST, invalid on source — arrives as an
 - Only valid, ready indexes of the supported access methods are copied as
   pages: plain btree (`pg_catalog` opclasses, partial and expression
   variants), BRIN with approved fixed-width core minmax opclasses, HASH
-  with core int2/int4/int8 opclasses, and SP-GiST with core
-  `quad_point_ops`/`kd_point_ops` on a plain `point` column. Every other
-  index arrives as an
-- Only valid, ready plain btree indexes (`pg_catalog` opclasses, partial and
-  expression variants) are copied as pages, plus the narrow per-AM
-  whitelists for BRIN (fixed-width minmax), hash (int2/int4/int8) and GIN
-  (`array_ops` on `int[]`, `jsonb_ops` on `jsonb`; plain single-column keys
-  only, pending list copied whole); every other index arrives as an
+  with core int2/int4/int8 opclasses, SP-GiST with core
+  `quad_point_ops`/`kd_point_ops` on a plain `point` column, GIN with
+  `array_ops` on `int[]` and `jsonb_ops` on `jsonb` (plain single-column
+  keys, pending list copied whole), and GiST with the core `point_ops`
+  on a plain `point` column; every other index — off-whitelist opclasses
+  of those methods, invalid on source — arrives as an
   invalid definition to `REINDEX` yourself — until then uniqueness/exclusion
   are not enforced. Cross-major deparse drift fails closed; custom opclasses
   (contrib extensions like `btree_gist` included) are rejected. After

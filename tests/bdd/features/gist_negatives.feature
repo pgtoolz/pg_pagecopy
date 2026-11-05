@@ -114,6 +114,43 @@ Feature: GIST target matching, corruption and cancellation fail closed
              (SELECT max(id) FROM public.t)
       """
 
+  Scenario: A source gist root advertising a larger page size fails bounded validation
+    Given a fresh PostgreSQL pair
+    And the following SQL is executed on "source":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.t (id integer PRIMARY KEY, p point);
+      CREATE INDEX t_p ON public.t USING gist (p);
+      INSERT INTO public.t SELECT i, point(i % 41, (i * 7) % 43)
+      FROM generate_series(1, 500) AS i;
+      CREATE FUNCTION pc_test_set_index_byte(regclass, integer, integer, integer)
+        RETURNS void AS 'pc_bdd_fixtures', 'pc_test_set_index_byte'
+        LANGUAGE C STRICT;
+      SELECT pc_test_set_index_byte('public.t_p', 0, 17, 63);
+      SELECT pc_test_set_index_byte('public.t_p', 0, 19, 64);
+      """
+    And the following SQL is executed on "target":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.t (id integer PRIMARY KEY, p point);
+      CREATE INDEX t_p ON public.t USING gist (p);
+      INSERT INTO public.t VALUES (9999, point(9999, 9999));
+      """
+    Then the following SQL on "target" fails with "gist page has an unexpected special area":
+      """
+      SELECT pagecopy.pull(
+        'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
+        'public.t', 'public.t', true
+      );
+      """
+    And the following SQL on "target" returns "1|9999|t":
+      """
+      SELECT (SELECT count(*) FROM public.t),
+             (SELECT max(id) FROM public.t),
+             (SELECT indisvalid AND indisready FROM pg_index
+              WHERE indexrelid = 'public.t_p'::regclass)
+      """
+
   Scenario Outline: A corrupted incoming GIST root fails verification on the target
     Given a fresh PostgreSQL pair
     And the following SQL is executed on "source":
