@@ -9,7 +9,8 @@ forms; BRIN: fixed-width minmax; hash: int2/int4/int8; SP-GiST:
 `quad_point_ops`/`kd_point_ops` on `point`; GIN: `array_ops` on `int[]`
 and `jsonb_ops` on `jsonb`, plain single-column keys; GiST: `point_ops`
 on `point`). Every other index — off-whitelist opclasses of those methods,
-  or multicolumn/INCLUDE forms outside the B-tree — degrades to an invalid
+  expression or partial forms, or multicolumn/INCLUDE forms on the
+  single-key methods (HASH, SP-GiST, GIN, GiST) — degrades to an invalid
 definition.
 
 - `src/pg_pagecopy/indexes/{mod,catalog,wire}.rs` — the AM-agnostic core:

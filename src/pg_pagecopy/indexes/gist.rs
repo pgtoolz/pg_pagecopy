@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn gist_layout_requires_the_target_to_resolve_every_source_procedure() {
-        // PostgreSQL 17 added GiST sortsupport to point_ops; a newer target
+        // PostgreSQL 14 added GiST sortsupport to point_ops; a newer target
         // resolving every older function still reads the pages correctly.
         let target = GistMetadata {
             procs: "1:3295,2:3290,3:3285,5:3292,6:3288,7:3291,8:3298,9:3299,11:9551".into(),
