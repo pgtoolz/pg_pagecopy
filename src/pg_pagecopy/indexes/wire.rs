@@ -2,12 +2,14 @@
 //!
 //! Wire tags: `0` = btree (physical transfer), `1` = invalid
 //! (definition only), `2` = brin (physical transfer), `3` = hash
-//! (physical transfer). Existing manifests must decode identically; the
-//! tags are part of the format and never renumbered.
+//! (physical transfer), `6` = gist (physical transfer). Existing
+//! manifests must decode identically; the tags are part of the format and
+//! never renumbered.
 
 use super::super::wire::{put_string, put_u32, Decoder, Result, WireError};
 use super::brin::BrinMetadata;
 use super::btree::BtreeMetadata;
+use super::gist::GistMetadata;
 use super::hash::HashMetadata;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,6 +22,7 @@ pub enum IndexTransfer {
     },
     Brin(BrinMetadata),
     Hash(HashMetadata),
+    Gist(GistMetadata),
 }
 
 /// Append one manifest index entry, including its wire tag.
@@ -53,6 +56,12 @@ pub fn encode_index(out: &mut Vec<u8>, index: &IndexTransfer) -> Result<()> {
             put_u32(out, metadata.hash_version)?;
             put_u32(out, metadata.hash_proc)?;
         }
+        IndexTransfer::Gist(metadata) => {
+            out.push(6);
+            put_string(out, &metadata.definition)?;
+            put_string(out, &metadata.shape)?;
+            put_string(out, &metadata.procs)?;
+        }
     }
     Ok(())
 }
@@ -84,6 +93,11 @@ pub fn decode_index(decoder: &mut Decoder<'_>) -> Result<IndexTransfer> {
             shape: decoder.string()?,
             hash_version: decoder.u32()?,
             hash_proc: decoder.u32()?,
+        }),
+        6 => IndexTransfer::Gist(GistMetadata {
+            definition: decoder.string()?,
+            shape: decoder.string()?,
+            procs: decoder.string()?,
         }),
         kind => return Err(WireError(format!("unknown index transfer kind {kind}"))),
     })
@@ -122,6 +136,14 @@ mod tests {
         }
     }
 
+    fn gist() -> GistMetadata {
+        GistMetadata {
+            definition: "gist (loc)".into(),
+            shape: "1|1|f|f|1|0|pg_catalog.point_ops|".into(),
+            procs: "1:3295,2:3290".into(),
+        }
+    }
+
     #[test]
     fn index_entries_round_trip_through_the_manifest_decoder() {
         let entries = [
@@ -132,6 +154,7 @@ mod tests {
             },
             IndexTransfer::Brin(brin()),
             IndexTransfer::Hash(hash()),
+            IndexTransfer::Gist(gist()),
         ];
         for entry in entries {
             let mut out = Vec::new();
@@ -141,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_tags_stay_zero_one_two_three_for_btree_invalid_brin_and_hash() {
+    fn wire_tags_stay_fixed_btree_invalid_brin_hash_and_gist() {
         // Existing manifests carry these tag bytes; renumbering would strand them.
         let mut out = Vec::new();
         encode_index(&mut out, &IndexTransfer::Btree(btree())).unwrap();
@@ -162,9 +185,12 @@ mod tests {
         let mut out = Vec::new();
         encode_index(&mut out, &IndexTransfer::Hash(hash())).unwrap();
         assert_eq!(out[0], 3);
+        let mut out = Vec::new();
+        encode_index(&mut out, &IndexTransfer::Gist(gist())).unwrap();
+        assert_eq!(out[0], 6);
         assert!(
-            decode_index(&mut Decoder::new(&[4])).is_err(),
-            "unknown index transfer kind 4"
+            decode_index(&mut Decoder::new(&[7])).is_err(),
+            "unknown index transfer kind 7"
         );
     }
 
@@ -224,6 +250,20 @@ mod tests {
         expected.extend_from_slice(shape);
         expected.extend_from_slice(&4u32.to_be_bytes());
         expected.extend_from_slice(&451u32.to_be_bytes());
+        assert_eq!(out, expected);
+
+        let mut out = Vec::new();
+        encode_index(&mut out, &IndexTransfer::Gist(gist())).unwrap();
+        let definition = b"gist (loc)";
+        let shape = b"1|1|f|f|1|0|pg_catalog.point_ops|";
+        let procs = b"1:3295,2:3290";
+        let mut expected = vec![6u8];
+        expected.extend_from_slice(&(u32::try_from(definition.len()).unwrap()).to_be_bytes());
+        expected.extend_from_slice(definition);
+        expected.extend_from_slice(&(u32::try_from(shape.len()).unwrap()).to_be_bytes());
+        expected.extend_from_slice(shape);
+        expected.extend_from_slice(&(u32::try_from(procs.len()).unwrap()).to_be_bytes());
+        expected.extend_from_slice(procs);
         assert_eq!(out, expected);
     }
 }

@@ -94,6 +94,58 @@ fn hash_page_is_all_zero(page: &[u8]) -> bool {
     page.iter().all(|byte| *byte == 0)
 }
 
+/// `MAXALIGN(sizeof(GISTPageOpaqueData))`: every `GiST` page ends with
+/// this 16-byte special space (`nsn`, `rightlink`, `flags`, `page_id`).
+const GIST_SPECIAL_SIZE: usize = 16;
+/// `GIST_PAGE_ID`, stored little-endian in the page's final halfword.
+const GIST_PAGE_ID: u16 = 0xFF81;
+/// `F_LEAF` in `GISTPageOpaqueData.flags`.
+const GIST_F_LEAF: u16 = 0x0001;
+
+/// A `GiST` page's `flags` field, little-endian, in the special space.
+fn gist_page_flags(page: &[u8]) -> u16 {
+    assert_eq!(page.len(), BLOCK_SIZE);
+    let offset = BLOCK_SIZE - GIST_SPECIAL_SIZE + 12;
+    u16::from_le_bytes([page[offset], page[offset + 1]])
+}
+
+/// A `GiST` page's `rightlink`, little-endian, in the special space.
+fn gist_page_rightlink(page: &[u8]) -> u32 {
+    assert_eq!(page.len(), BLOCK_SIZE);
+    let offset = BLOCK_SIZE - GIST_SPECIAL_SIZE + 8;
+    u32::from_le_bytes([
+        page[offset],
+        page[offset + 1],
+        page[offset + 2],
+        page[offset + 3],
+    ])
+}
+
+/// Whether a block is a `GiST` page of the given leafness with the `GiST`
+/// page id set, so the special space really is a `GISTPageOpaqueData`.
+fn is_gist_page(page: &[u8], leaf: bool) -> bool {
+    let id_offset = BLOCK_SIZE - 2;
+    let page_id = u16::from_le_bytes([page[id_offset], page[id_offset + 1]]);
+    page_id == GIST_PAGE_ID && (gist_page_flags(page) & GIST_F_LEAF != 0) == leaf
+}
+
+/// Whether a block is a populated `GiST` page of the given leafness: the
+/// page id is present and the line pointer array has started past the page
+/// header (`pd_lower`), so at least one index tuple is stored.
+fn gist_page_carries_tuples(page: &[u8], leaf: bool) -> bool {
+    let lower = u16::from_le_bytes([page[12], page[13]]) as usize;
+    is_gist_page(page, leaf) && lower > 24
+}
+
+/// Whether a block is an unlinked `GiST` root: the page id is present and
+/// `rightlink` is `InvalidBlockNumber`, as every root split rewrites block
+/// 0 with all downlinks and no sibling link.
+fn is_gist_root_page(page: &[u8]) -> bool {
+    let id_offset = BLOCK_SIZE - 2;
+    let page_id = u16::from_le_bytes([page[id_offset], page[id_offset + 1]]);
+    page_id == GIST_PAGE_ID && gist_page_rightlink(page) == u32::MAX
+}
+
 #[given("a fresh PostgreSQL pair")]
 async fn fresh_pair(world: &mut AttachWorld) {
     let pair = tokio::time::timeout(Duration::from_secs(60), PostgresPair::start())
@@ -664,6 +716,22 @@ async fn record_target_hash_page(
     record_target_block_checked(world, relation, block, check, &kind).await;
 }
 
+#[when(expr = "target relation {string} block {int} is recorded as a gist {string} page")]
+async fn record_target_gist_page(
+    world: &mut AttachWorld,
+    relation: String,
+    block: u64,
+    kind: String,
+) {
+    let check = match kind.as_str() {
+        "root" => is_gist_root_page,
+        "leaf" => |page: &[u8]| gist_page_carries_tuples(page, true),
+        "internal" => |page: &[u8]| gist_page_carries_tuples(page, false),
+        _ => panic!("gist page kind must be root, leaf or internal, not {kind:?}"),
+    };
+    record_target_block_checked(world, relation, block, check, &kind).await;
+}
+
 #[then("the recorded target block is unchanged after crash recovery")]
 fn recorded_block_survives_recovery(world: &mut AttachWorld) {
     let path = world
@@ -870,5 +938,39 @@ mod tests {
             super::LH_BUCKET_PAGE,
             32
         )));
+    }
+
+    fn gist_page(leaf: bool, lower: u16, rightlink: u32) -> [u8; BLOCK_SIZE] {
+        let mut page = [0u8; BLOCK_SIZE];
+        page[12..14].copy_from_slice(&lower.to_le_bytes());
+        let special = BLOCK_SIZE - super::GIST_SPECIAL_SIZE;
+        page[special + 8..special + 12].copy_from_slice(&rightlink.to_le_bytes());
+        page[special + 12..special + 14]
+            .copy_from_slice(&(if leaf { super::GIST_F_LEAF } else { 0 }).to_le_bytes());
+        page[BLOCK_SIZE - 2..BLOCK_SIZE]
+            .copy_from_slice(&super::GIST_PAGE_ID.to_le_bytes());
+        page
+    }
+
+    #[test]
+    fn a_gist_page_is_recognized_only_with_page_id_leafness_and_link() {
+        let leaf = gist_page(true, 32, u32::MAX);
+        assert!(super::gist_page_carries_tuples(&leaf, true));
+        assert!(!super::gist_page_carries_tuples(&leaf, false));
+        // An empty leaf page still carries no line pointers.
+        assert!(!super::gist_page_carries_tuples(
+            &gist_page(true, 24, u32::MAX),
+            true
+        ));
+        let internal = gist_page(false, 32, 0);
+        assert!(super::gist_page_carries_tuples(&internal, false));
+        // A root is any leafness with an unlinked rightlink.
+        assert!(super::is_gist_root_page(&leaf));
+        assert!(super::is_gist_root_page(&gist_page(false, 32, u32::MAX)));
+        assert!(!super::is_gist_root_page(&internal));
+        let mut wrong_id = gist_page(true, 32, u32::MAX);
+        wrong_id[BLOCK_SIZE - 2] = 0;
+        assert!(!super::is_gist_root_page(&wrong_id));
+        assert!(!super::gist_page_carries_tuples(&[0u8; BLOCK_SIZE], true));
     }
 }

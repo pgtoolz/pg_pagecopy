@@ -95,6 +95,7 @@ unsafe extern "C" {
         dst: *mut c_char,
     );
     fn pc_prepare_page(page: *mut c_char, block: pg_sys::BlockNumber, checksums: bool);
+    fn pc_prepare_gist_page(page: *mut c_char, block: pg_sys::BlockNumber, checksums: bool);
     fn pc_verify_page(page: *mut c_char, block: pg_sys::BlockNumber, checksums: bool) -> bool;
     fn pc_heap_page_is_frozen(page: *const c_char) -> bool;
     fn pc_assert_heap_page_frozen(
@@ -313,6 +314,15 @@ impl Rel {
     }
 
     #[allow(clippy::cast_possible_wrap)]
+    pub fn is_gist_am(&self) -> bool {
+        unsafe {
+            let rel = &*(*self.0).rd_rel;
+            rel.relkind == pg_sys::RELKIND_INDEX as std::os::raw::c_char
+                && rel.relam == pg_sys::GIST_AM_OID
+        }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
     pub fn is_btree(&self) -> bool {
         unsafe {
             let relation = &*self.0;
@@ -355,6 +365,20 @@ impl Rel {
         }
     }
 
+    /// Same gate for gist: a real gist index that is valid, ready and not
+    /// part of an exclusion constraint.
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn is_gist(&self) -> bool {
+        unsafe {
+            let relation = &*self.0;
+            self.is_gist_am()
+                && !relation.rd_index.is_null()
+                && (*relation.rd_index).indisvalid
+                && (*relation.rd_index).indisready
+                && !(*relation.rd_index).indisexclusion
+        }
+    }
+
     pub fn is_unique(&self) -> bool {
         unsafe {
             !self.0.is_null() && !(*self.0).rd_index.is_null() && (*(*self.0).rd_index).indisunique
@@ -363,11 +387,12 @@ impl Rel {
 
     /// Why an index cannot transfer as page images; `None` when it can.
     /// The sanity checks are shared by every physical access method (btree,
-    /// brin, hash); the per-AM classification in `indexes` decides the rest,
-    /// and every other access method degrades here by name.
+    /// brin, hash, gist); the per-AM classification in `indexes` decides the
+    /// rest, and every other access method degrades here by name.
     pub fn non_physical_reason(&self) -> Option<String> {
         unsafe {
-            if !self.is_btree_am() && !self.is_brin_am() && !self.is_hash_am() {
+            if !self.is_btree_am() && !self.is_brin_am() && !self.is_hash_am() && !self.is_gist_am()
+            {
                 return Some(format!(
                     "index access method {}",
                     access_method_name((*(*self.0).rd_rel).relam)
@@ -556,6 +581,20 @@ impl Rel {
 
     pub fn prepare_page(block: u32, page: &mut [u8], checksums: bool) {
         unsafe { guard(|| pc_prepare_page(page.as_mut_ptr().cast(), block, checksums)) }
+    }
+
+    /// Prepare one index main-fork page for the target: `GiST` pages carry an
+    /// NSN in their special area that must be stamped alongside the page
+    /// LSN (see `src/index_gist.c`); every other access method uses the
+    /// generic page preparation.
+    pub fn prepare_index_page(&self, block: u32, page: &mut [u8], checksums: bool) {
+        if self.is_gist_am() {
+            unsafe {
+                guard(|| pc_prepare_gist_page(page.as_mut_ptr().cast(), block, checksums));
+            }
+        } else {
+            Self::prepare_page(block, page, checksums);
+        }
     }
 
     pub fn verify_page(block: u32, page: &mut [u8], checksums: bool) -> bool {

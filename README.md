@@ -68,7 +68,7 @@ flowchart TD
     lock -.->|"writer raced —<br/>rollback, retry ×3"| freeze
 
     read -->|"1️⃣ logical: schema descriptor —<br/>columns, defaults, CHECKs,<br/>index definitions"| create["🧱 Create or fully overwrite<br/>the target table (one txn,<br/>rolls back on failure)"]
-    read -->|"2️⃣ binary: pages as-is —<br/>heap · TOAST · btree · VM · FSM"| fixup["🛡️ Validate on arrival:<br/>manifest ↔ target (checksum mode,<br/>TOAST layout, attributes),<br/>page bounds, relation/fork routing"]
+    read -->|"2️⃣ binary: pages as-is —<br/>heap · TOAST · indexes · VM · FSM"| fixup["🛡️ Validate on arrival:<br/>manifest ↔ target (checksum mode,<br/>TOAST layout, attributes),<br/>page bounds, relation/fork routing"]
     read -.->|"unsupported secondary indexes:<br/>definitions only, no pages"| invalid["⚠️ invalid definitions preserved"]
 
     create --> write
@@ -145,7 +145,8 @@ after a target VACUUM.
 - `physical` — pages copied as-is, usable right after the transfer;
 - `definition` — recreated from its definition, then marked invalid
   (`indisvalid=false`, `indisready=false`) and rebuilt with `REINDEX`;
-  `detail` explains why (`index access method hash`, `invalid on source`,
+  `detail` explains why (`gist opclass pg_catalog.box_ops on box is not the
+  core point_ops on point`, `invalid on source`,
   or a backing constraint);
 - `error` — the source-side transfer plan is unsupported (unsafe column type,
   custom opclass, or another catalog restriction).
@@ -169,7 +170,7 @@ Example output:
  name                      | type        | supported | method     | size  | detail
 ---------------------------+-------------+-----------+------------+-------+-----------------------------------------------------------
  events_custom             | index       | f         | error      |  8192 | custom opclasses are not supported; only pg_catalog btree opclasses are allowed
- events_hash               | index       | t         | definition |  8192 | index access method hash
+ events_gist_box             | index       | t         | definition |  8192 | gist opclass pg_catalog.box_ops on box is not the core point_ops on point
  events_key                | index       | t         | definition |  8192 | invalid on source
  events_valid              | index       | t         | physical   | 16384 |
  pg_toast.pg_toast_16401   | toast       | t         | physical   |  8192 |
@@ -187,11 +188,15 @@ Example output:
   connect; compatible results pass these physical limits automatically.
 - Heap tables only: no partitions, foreign or unlogged tables, downgrades,
   differing checksum modes.
-- Only valid, ready plain btree indexes (`pg_catalog` opclasses, partial and
-  expression variants) are copied as pages; every other index arrives as an
+- Valid, ready btree indexes (`pg_catalog` opclasses, partial and expression
+  variants) are copied as pages, as are BRIN indexes on the core fixed-width
+  minmax opclasses, HASH indexes on the core int opclasses and GiST indexes
+  on the core `point_ops` opclass of `point`; every other index — other
+  BRIN/HASH/GiST opclasses, GIN, SP-GiST, invalid on source — arrives as an
   invalid definition to `REINDEX` yourself — until then uniqueness/exclusion
   are not enforced. Cross-major deparse drift fails closed; custom opclasses
-  are rejected. After transfer, `REINDEX` alone restores enforcement on an
+  (contrib extensions like `btree_gist` included) are rejected. After
+  transfer, `REINDEX` alone restores enforcement on an
   auto-created target; on a pre-created target re-add PK/UNIQUE with
   `ALTER TABLE ... ADD CONSTRAINT ... USING INDEX` and exclusion with
   `ADD CONSTRAINT ... EXCLUDE ...` (no `USING INDEX` for exclusion). A
@@ -230,7 +235,7 @@ overwrite, auto-creation, validation, rollback and cross-major transfers,
 verified with `verify_heapam` and `bt_index_check(..., heapallindexed=true)`.
 
 Run a tagged subset with `PG_PAGECOPY_TAGS` (comma-separated Gherkin tags;
-features carry area tags like `@hash`, `@brin`, `@btree_extended`,
+features carry area tags like `@hash`, `@brin`, `@gist`, `@btree_extended`,
 `@core`, `@validation`, and finer tags like `@recovery`, `@local`):
 
 ```sh
