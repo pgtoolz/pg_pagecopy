@@ -1,5 +1,6 @@
 ARG SOURCE_PG_VERSION=17
 ARG TARGET_PG_VERSION=18
+ARG EXTENSION_TAG=dev
 
 FROM rust:1.99-bookworm AS build
 RUN rustup component add clippy
@@ -18,7 +19,7 @@ RUN touch main.rs postgres.rs steps.rs world.rs \
     && cargo test --release --locked \
     && cargo build --release --locked
 
-FROM pg-pagecopy-pg${SOURCE_PG_VERSION}:dev AS extension_source
+FROM pg-pagecopy-pg${SOURCE_PG_VERSION}:${EXTENSION_TAG} AS extension_source
 
 FROM postgres:${SOURCE_PG_VERSION}-bookworm AS fixtures_source
 ARG SOURCE_PG_VERSION
@@ -40,7 +41,7 @@ RUN cc -shared -fPIC -Wall -Werror \
     -I"$(/usr/lib/postgresql/${TARGET_PG_VERSION}/bin/pg_config --includedir-server)" \
     /tmp/fixtures.c -o /tmp/pc_bdd_fixtures.so
 
-FROM pg-pagecopy-pg${TARGET_PG_VERSION}:dev
+FROM pg-pagecopy-pg${TARGET_PG_VERSION}:${EXTENSION_TAG}
 ARG SOURCE_PG_VERSION
 ARG TARGET_PG_VERSION
 RUN apt-get update \

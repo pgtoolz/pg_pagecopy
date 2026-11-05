@@ -82,3 +82,34 @@ Feature: Production build excludes test-only debug hooks
       FROM pg_index WHERE indexrelid = 'public.t_k'::regclass;
       ROLLBACK;
       """
+  Scenario: A normal spgist pull succeeds on a release build
+    Given a fresh PostgreSQL pair with checksums "enabled"
+    And the following SQL is executed on "source":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.t (id integer PRIMARY KEY, p point);
+      CREATE INDEX t_q ON public.t USING spgist (p);
+      INSERT INTO public.t SELECT i, point(i % 97, i % 89) FROM generate_series(1, 3000) AS i;
+      """
+    And the following SQL is executed on "target":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      """
+    When the following SQL is executed on "target":
+      """
+      SELECT pagecopy.pull(
+        'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
+        'public.t', 'public.t', true
+      );
+      """
+    Then the following SQL on "target" returns "t|3000|11":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL enable_bitmapscan = off;
+      SELECT indisvalid AND indisready,
+             (SELECT count(*) FROM public.t),
+             (SELECT count(*) FROM public.t WHERE p <@ box(point(0, 0), point(4, 4)))
+      FROM pg_index WHERE indexrelid = 'public.t_q'::regclass;
+      ROLLBACK;
+      """

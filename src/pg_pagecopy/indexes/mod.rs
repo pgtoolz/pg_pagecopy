@@ -2,12 +2,14 @@
 //! degradation of source indexes, matching against target indexes, and the
 //! index entries of the manifest wire format. Transfer variants dispatch
 //! through exhaustive matches over [`wire::IndexTransfer`], never runtime
-//! registration; access-method specifics live in [`btree`] and [`brin`].
+//! registration; access-method specifics live in [`btree`], [`brin`],
+//! [`hash`] and [`spgist`].
 
 mod brin;
 mod btree;
 mod catalog;
 mod hash;
+mod spgist;
 pub mod wire;
 
 pub use brin::BrinMetadata;
@@ -18,4 +20,5 @@ pub use catalog::{
     ClassifyIndex,
 };
 pub use hash::HashMetadata;
+pub use spgist::SpgistMetadata;
 pub use wire::IndexTransfer;
