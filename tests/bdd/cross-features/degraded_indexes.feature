@@ -1,6 +1,10 @@
 @cross-major @degraded
 Feature: Non-btree indexes degrade and rebuild across major versions
 
+  Only the whitelisted access methods transfer physically across majors;
+  the approved gin opclasses (array_ops on int[]) transfer while every
+  other non-btree access method degrades to an invalid definition.
+
   Scenario Outline: PostgreSQL <source_major> to <target_major> degrades non-btree indexes and REINDEX rebuilds them
     Given a fresh PostgreSQL <source_major> to <target_major> pair with checksums "enabled"
     And the following SQL is executed on "source":
@@ -11,6 +15,7 @@ Feature: Non-btree indexes degrade and rebuild across major versions
       );
       CREATE INDEX events_hash ON public.events USING hash (payload);
       CREATE INDEX events_gin ON public.events USING gin (tags);
+      CREATE INDEX events_gin_expr ON public.events USING gin (to_tsvector('simple', payload));
       CREATE INDEX events_gist ON public.events USING gist (loc);
       CREATE INDEX events_brin ON public.events USING brin (payload);
       INSERT INTO public.events
@@ -34,6 +39,24 @@ Feature: Non-btree indexes degrade and rebuild across major versions
              (SELECT count(*) FROM pg_index
               WHERE indrelid = 'public.imported_events'::regclass AND NOT indisvalid)
       FROM public.imported_events;
+      """
+    And the following SQL on "target" returns "t|2":
+      """
+      BEGIN;
+      SET LOCAL enable_seqscan = off;
+      SELECT indisvalid AND indisready,
+             (SELECT count(*) FROM public.imported_events WHERE tags @> ARRAY[5])
+      FROM pg_index i
+      JOIN pg_class c ON c.oid = i.indexrelid
+      WHERE i.indrelid = 'public.imported_events'::regclass AND c.relname = 'events_gin';
+      ROLLBACK;
+      """
+    And the following SQL on "target" returns "t":
+      """
+      SELECT NOT indisvalid
+      FROM pg_index i
+      JOIN pg_class c ON c.oid = i.indexrelid
+      WHERE i.indrelid = 'public.imported_events'::regclass AND c.relname = 'events_gin_expr';
       """
     When the following SQL is executed on "target":
       """

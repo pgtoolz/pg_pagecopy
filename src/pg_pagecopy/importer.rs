@@ -414,6 +414,34 @@ impl ImportState {
                 ));
             }
         }
+        // Fixed non-metapage pages (SP-GiST roots 1 and 2) carry
+        // page-type flags the generic header checks cannot see.
+        if fork == MAIN_FORK
+            && metadata.kind == RelationKind::Index
+            && matches!(packet.block, 1 | 2)
+        {
+            // Debug-only corruption hook for the BDD suite: flip one byte of
+            // this incoming fixed tree page to exercise its validator.
+            #[cfg(feature = "test-hooks")]
+            if packet.block
+                == u32::try_from(crate::DEBUG_CORRUPT_INDEX_TREE_BLOCK.get()).unwrap_or(u32::MAX)
+                && usize::try_from(crate::DEBUG_CORRUPT_INDEX_TREE_OFFSET.get())
+                    .is_ok_and(|offset| offset < packet.bytes.len())
+            {
+                packet.bytes[usize::try_from(crate::DEBUG_CORRUPT_INDEX_TREE_OFFSET.get())
+                    .expect("nonnegative offset fits usize")] ^= 0xFF;
+            }
+            let ordinal = self
+                .index_ordinal(relation_index, metadata.fork)
+                .ok_or_else(|| "index metadata ordinal underflow".to_owned())?;
+            let entry = indexes::physical_index(&self.manifest.indexes, ordinal)
+                .ok_or_else(|| "missing index metadata in manifest".to_owned())?;
+            if !indexes::verify_index_tree_page(entry, &mut packet.bytes, packet.block) {
+                return Err(format!(
+                    "index tree page verification failed for relation {relation_index}"
+                ));
+            }
+        }
         // Debug-only BDD hook: drop one incoming index page without
         // installing it or advancing the expected block, so the next packet
         // exercises the out-of-order rejection and a short stream the
@@ -453,6 +481,7 @@ impl ImportState {
                         indexes::IndexTransfer::Brin(_)
                             | indexes::IndexTransfer::Hash(_)
                             | indexes::IndexTransfer::Spgist(_)
+                            | indexes::IndexTransfer::Gin(_)
                     )
                 })
         {

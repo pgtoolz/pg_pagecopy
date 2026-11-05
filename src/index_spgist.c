@@ -53,6 +53,13 @@ pc_spgist_metapage_ok(Page page, BlockNumber nblocks, const char **detail)
         *detail = "spgist metapage is uninitialized";
         return false;
     }
+    /* Bind pd_special absolutely before any special-area dereference: the
+     * size check alone derives from the header-advertised page size and can
+     * pass while the special area sits outside this buffer. */
+    if (phdr->pd_special != BLCKSZ - MAXALIGN(sizeof(SpGistPageOpaqueData)))    {
+        *detail = "spgist metapage has an unexpected special area";
+        return false;
+    }
     if (PageGetSpecialSize(page) != MAXALIGN(sizeof(SpGistPageOpaqueData)))
     {
         *detail = "spgist metapage has an unexpected special area";
@@ -100,9 +107,13 @@ pc_spgist_metapage_ok(Page page, BlockNumber nblocks, const char **detail)
     {
         BlockNumber blkno = metap->lastUsedPages.cachedPage[i].blkno;
 
-        if (blkno != InvalidBlockNumber && blkno >= nblocks)
+        /* Upstream never caches the fixed metapage/root pages and asserts
+         * !SpGistBlockIsFixed for every cache entry (spgutils.c); accepting
+         * one would let a later write allocate over a fixed page. */
+        if (blkno != InvalidBlockNumber &&
+            (SpGistBlockIsFixed(blkno) || blkno >= nblocks))
         {
-            *detail = "spgist metapage cached page address out of range";
+            *detail = "spgist metapage cached page address is invalid";
             return false;
         }
     }
@@ -119,10 +130,18 @@ static bool
 pc_spgist_tree_page_ok(Page page, bool nulls, const char **detail)
 {
     SpGistPageOpaque opaque;
+    PageHeader phdr = (PageHeader) page;
 
     if (PageIsNew(page))
     {
         *detail = "spgist tree page is uninitialized";
+        return false;
+    }
+    /* Same absolute special-area binding as the metapage, before any
+     * special-area dereference. */
+    if (phdr->pd_special != BLCKSZ - MAXALIGN(sizeof(SpGistPageOpaqueData)))
+    {
+        *detail = "spgist tree page has an unexpected special area";
         return false;
     }
     if (PageGetSpecialSize(page) != MAXALIGN(sizeof(SpGistPageOpaqueData)))
@@ -218,4 +237,20 @@ pc_verify_spgist_metapage(Page page, uint32 nblocks)
     const char *detail = NULL;
 
     return pc_spgist_metapage_ok(page, nblocks, &detail);
+}
+
+/*
+ * Verify one incoming fixed tree page: block 1 is the normal root and
+ * block 2 the nulls root; both bypass the metapage-only dispatch above,
+ * and the generic page-header checks alone would accept a corrupted or
+ * all-zero root. Anything but those two blocks is not validated here.
+ */
+bool
+pc_verify_spgist_tree_page(Page page, uint32 blkno)
+{
+    const char *detail = NULL;
+
+    if (blkno != SPGIST_ROOT_BLKNO && blkno != SPGIST_NULL_BLKNO)
+        return true;
+    return pc_spgist_tree_page_ok(page, blkno == SPGIST_NULL_BLKNO, &detail);
 }

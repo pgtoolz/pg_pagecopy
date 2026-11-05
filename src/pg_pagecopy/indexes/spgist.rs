@@ -56,17 +56,20 @@ struct RawSpgistMetadata {
 
 unsafe extern "C" {
     fn pc_verify_spgist_metapage(page: *mut c_char, blocks: u32) -> bool;
+    fn pc_verify_spgist_tree_page(page: *mut c_char, blkno: u32) -> bool;
     fn pc_spgist_metadata(rel: pg_sys::Relation, metadata: *mut RawSpgistMetadata);
 }
 
 /// Exact core opclass and indexed-type pairs that transfer as page images.
-/// `quad_point_ops` and `kd_point_ops` store fixed-width point/box datums
-/// (no varlena, TOAST, collation or datum-size dependence), and their
-/// support functions in `geo_spgist.c` plus their pinned `pg_proc` OIDs
-/// are identical on every supported major, so the tree pages mean the same
-/// thing on any target. Every other SP-GiST index (`text_ops` radix trees
-/// whose label layout and long-value handling were never audited across
-/// majors, `poly_ops`, `range_ops`, `inet_ops`, expressions, partials,
+/// `quad_point_ops` and `kd_point_ops` (implemented in
+/// `spgquadtreeproc.c`/`spgkdtreeproc.c`) store fixed-width `point` leaf
+/// datums with `point` (quad) or `float8` (kd) prefixes and no node labels
+/// — no varlena, TOAST, collation or datum-size dependence — and their
+/// support functions plus pinned `pg_proc` OIDs (4018–4026) are identical
+/// on every supported major, so the tree pages mean the same thing on any
+/// target. Every other SP-GiST index (`text_ops` radix trees whose label
+/// layout and long-value handling were never audited across majors,
+/// `poly_ops`, `box_ops`, `range_ops`, `inet_ops`, expressions, partials,
 /// included columns) stays on the degraded definition-only path; custom
 /// opclasses remain a hard error.
 const APPROVED_SPGIST: [(&str, pg_sys::Oid); 2] = [
@@ -218,6 +221,15 @@ pub(super) fn matches_layout(expected: &SpgistMetadata, index: &Rel) -> bool {
 pub(super) fn verify_metapage(page: &mut [u8], blocks: u32) -> bool {
     assert_eq!(page.len(), ffi::PAGE_SIZE);
     unsafe { ffi::guard(|| pc_verify_spgist_metapage(page.as_mut_ptr().cast(), blocks)) }
+}
+
+/// Verify one incoming fixed tree page (block 1 root / block 2 nulls
+/// root) of a transferred spgist index: the generic page-header checks
+/// alone would accept a corrupted or all-zero root. Other blocks are not
+/// fixed pages and return true untouched.
+pub(super) fn verify_tree_page(page: &mut [u8], blkno: u32) -> bool {
+    assert_eq!(page.len(), ffi::PAGE_SIZE);
+    unsafe { ffi::guard(|| pc_verify_spgist_tree_page(page.as_mut_ptr().cast(), blkno)) }
 }
 
 // The layout rule guards AM compatibility; see the BRIN/btree equivalents.

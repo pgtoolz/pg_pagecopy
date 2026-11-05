@@ -6,6 +6,14 @@ access methods transfer physically today: B-tree, BRIN, HASH and SP-GiST,
 each with its own narrow approved-opclass whitelist. Every other access
 method (GiST, GIN, …), and every index of a supported method outside its
 whitelist, degrades to an invalid definition.
+there is no registry, no plugin hook and no runtime AM discovery. The
+access methods that transfer physically today are B-tree, BRIN, hash and
+GIN, each behind a narrow whitelist of exact core opclass/type pairs
+(B-tree: any `pg_catalog` opclass including partial and expression forms;
+BRIN: fixed-width minmax; hash: int2/int4/int8; GIN: `array_ops` on `int[]`
+and `jsonb_ops` on `jsonb`, plain single-column keys). Every other index
+(GiST, SP-GiST, off-whitelist opclasses, multicolumn GIN, …) degrades to
+an invalid definition.
 
 - `src/pg_pagecopy/indexes/{mod,catalog,wire}.rs` — the AM-agnostic core:
   classification and degradation of source indexes, matching against target
@@ -15,6 +23,13 @@ whitelist, degrades to an invalid definition.
 - `src/pg_pagecopy/indexes/{btree,brin,hash,spgist}.rs` — the per-AM modules:
   metadata layout comparison, metapage verification and the FFI into
   `src/index_<am>.c`. Access-method specifics live there and nowhere else.
+  invalid, `2` = brin, `3` = hash, `5` = gin; never renumbered — existing
+  manifests must decode identically).
+- `src/pg_pagecopy/indexes/btree.rs` — the B-tree module: metadata layout
+  comparison, metapage verification and the FFI into `src/index_btree.c`.
+  Access-method specifics live here and nowhere else; `brin.rs`, `hash.rs`
+  and `gin.rs` follow the same shape with their C halves in
+  `src/index_{brin,hash,gin}.c`.
 - `src/pg_pagecopy/exporter.rs` / `importer.rs` — generic transport: they
   dispatch over `IndexTransfer` and never interpret AM-specific fields.
 - TOAST indexes are strictly physical B-tree: a TOAST index that is not a

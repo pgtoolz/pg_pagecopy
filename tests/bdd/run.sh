@@ -31,7 +31,7 @@ build_extension() {
   fi
   # shellcheck disable=SC2086
   docker build $cache_args --build-arg PG_VERSION="$major" \
-    --target "$target" -t "pg-pagecopy-pg${major}:${tag}${tag_suffix}" "$root"
+    --target "$target" -t "pg-pagecopy-pg${major}:${tag}${PG_PAGECOPY_IMAGE_SUFFIX:-}" "$root"
 }
 
 if [ "$SOURCE_PG_VERSION" != "$TARGET_PG_VERSION" ]; then
@@ -40,10 +40,10 @@ if [ "$SOURCE_PG_VERSION" != "$TARGET_PG_VERSION" ]; then
   docker build -f "$root/tests/bdd/Dockerfile.cross" \
     --build-arg SOURCE_PG_VERSION="$SOURCE_PG_VERSION" \
     --build-arg TARGET_PG_VERSION="$TARGET_PG_VERSION" \
-    --build-arg EXTENSION_TAG="dev${tag_suffix}" \
-    -t "pg-pagecopy-bdd-pg${SOURCE_PG_VERSION}-pg${TARGET_PG_VERSION}:dev${tag_suffix}" "$root"
-  image="pg-pagecopy-bdd-pg${SOURCE_PG_VERSION}-pg${TARGET_PG_VERSION}:dev${tag_suffix}"
-  matrix="$SOURCE_PG_VERSION-$TARGET_PG_VERSION${tag_suffix}"
+    --build-arg IMAGE_TAG_SUFFIX="${PG_PAGECOPY_IMAGE_SUFFIX:-}" \
+    -t "pg-pagecopy-bdd-pg${SOURCE_PG_VERSION}-pg${TARGET_PG_VERSION}:dev${PG_PAGECOPY_IMAGE_SUFFIX:-}" "$root"
+  image="pg-pagecopy-bdd-pg${SOURCE_PG_VERSION}-pg${TARGET_PG_VERSION}:dev${PG_PAGECOPY_IMAGE_SUFFIX:-}"
+  matrix="$SOURCE_PG_VERSION-$TARGET_PG_VERSION"
   features=/opt/pg-pagecopy-bdd/cross-features
 else
   target=test
@@ -57,9 +57,9 @@ else
   build_extension "$PG_VERSION" "$target" "$image_tag"
   docker build -f "$root/tests/bdd/Dockerfile" \
     --build-arg PG_VERSION="$PG_VERSION" \
-    --build-arg EXTENSION_TAG="${image_tag}${tag_suffix}" \
-    -t "pg-pagecopy-bdd-pg${PG_VERSION}:${image_tag}${tag_suffix}" "$root"
-  image="pg-pagecopy-bdd-pg${PG_VERSION}:${image_tag}${tag_suffix}"
+    --build-arg EXTENSION_TAG="$image_tag${PG_PAGECOPY_IMAGE_SUFFIX:-}" \
+    -t "pg-pagecopy-bdd-pg${PG_VERSION}:${image_tag}${PG_PAGECOPY_IMAGE_SUFFIX:-}" "$root"
+  image="pg-pagecopy-bdd-pg${PG_VERSION}:${image_tag}${PG_PAGECOPY_IMAGE_SUFFIX:-}"
   features=/opt/pg-pagecopy-bdd/features
 fi
 

@@ -265,10 +265,64 @@ Feature: SP-GiST target matching, corruption and cancellation fail closed
       """
 
     Examples:
-      | offset | detail                                              |
-      | 8190   | spgist metapage has an unexpected page id           |
-      | 8184   | spgist metapage is not a metapage                   |
-      | 28     | spgist metapage cached page address out of range    |
+      | offset | detail                                          |
+      | 8190   | spgist metapage has an unexpected page id       |
+      | 8184   | spgist metapage is not a metapage               |
+      | 28     | spgist metapage cached page address is invalid  |
+
+  Scenario: A source spgist metapage caching a fixed page is rejected
+    Given a fresh PostgreSQL pair
+    And the following SQL is executed on "source":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.t (id integer PRIMARY KEY, p point);
+      CREATE INDEX t_q ON public.t USING spgist (p);
+      INSERT INTO public.t SELECT i, point(i % 97, i % 89) FROM generate_series(1, 2000) AS i;
+      CREATE FUNCTION pc_test_set_index_byte(regclass, integer, integer, integer)
+        RETURNS void AS 'pc_bdd_fixtures', 'pc_test_set_index_byte'
+        LANGUAGE C STRICT;
+      SELECT pc_test_set_index_byte('public.t_q', 0, 28, 1);
+      """
+    And the following SQL is executed on "target":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.t (id integer PRIMARY KEY, p point);
+      CREATE INDEX t_q ON public.t USING spgist (p);
+      INSERT INTO public.t VALUES (9999, point(-99, -99));
+      """
+    Then the following SQL on "target" fails with "spgist metapage cached page address is invalid":
+      """
+      SELECT pagecopy.pull(
+        'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
+        'public.t', 'public.t', true
+      );
+      """
+
+  Scenario: A corrupted incoming spgist root fails tree page verification on the target
+    Given a fresh PostgreSQL pair
+    And the following SQL is executed on "source":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.t (id integer PRIMARY KEY, p point);
+      CREATE INDEX t_q ON public.t USING spgist (p);
+      INSERT INTO public.t SELECT i, point(i % 97, i % 89) FROM generate_series(1, 2000) AS i;
+      """
+    And the following SQL is executed on "target":
+      """
+      CREATE EXTENSION pg_pagecopy;
+      CREATE TABLE public.t (id integer PRIMARY KEY, p point);
+      CREATE INDEX t_q ON public.t USING spgist (p);
+      INSERT INTO public.t VALUES (9999, point(-99, -99));
+      """
+    Then the following SQL on "target" fails with "index tree page verification failed":
+      """
+      SET pagecopy.debug_corrupt_index_tree_block = 1;
+      SET pagecopy.debug_corrupt_index_tree_offset = 8184;
+      SELECT pagecopy.pull(
+        'host=127.0.0.1 port=${SOURCE_PORT} dbname=postgres user=postgres',
+        'public.t', 'public.t', true
+      );
+      """
 
   Scenario Outline: A corrupted incoming spgist metapage fails verification on the target
     Given a fresh PostgreSQL pair

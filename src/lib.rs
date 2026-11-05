@@ -25,6 +25,13 @@ static DEBUG_CORRUPT_INDEX_METAPAGE: GucSetting<i32> = GucSetting::<i32>::new(-1
 /// one has already been written.
 #[cfg(feature = "test-hooks")]
 static DEBUG_CORRUPT_INDEX_ORDINAL: GucSetting<i32> = GucSetting::<i32>::new(-1);
+/// Debug-only: when both are >= 0, flips one byte of the incoming index
+/// page with this block number before its fixed-tree-page verification,
+/// exercising the SP-GiST root validators end to end.
+#[cfg(feature = "test-hooks")]
+static DEBUG_CORRUPT_INDEX_TREE_BLOCK: GucSetting<i32> = GucSetting::<i32>::new(-1);
+#[cfg(feature = "test-hooks")]
+static DEBUG_CORRUPT_INDEX_TREE_OFFSET: GucSetting<i32> = GucSetting::<i32>::new(-1);
 /// Debug-only: when both are >= 0, the incoming index page packet for this
 /// manifest relation and block number is dropped without installing it, so
 /// the next packet exercises the out-of-order and stream-ended-early
@@ -76,6 +83,28 @@ pub extern "C-unwind" fn _PG_init() {
             c"Flips the byte at this offset of block 0 of every incoming index \
              relation before metapage verification. -1 disables.",
             &DEBUG_CORRUPT_INDEX_METAPAGE,
+            -1,
+            8191,
+            GucContext::Suset,
+            GucFlags::default(),
+        );
+        GucRegistry::define_int_guc(
+            c"pagecopy.debug_corrupt_index_tree_block",
+            c"Block number of the incoming index tree page to corrupt (debug)",
+            c"Together with pagecopy.debug_corrupt_index_tree_offset, flips one \
+             byte of this incoming index page before fixed-tree-page verification.",
+            &DEBUG_CORRUPT_INDEX_TREE_BLOCK,
+            -1,
+            i32::MAX,
+            GucContext::Suset,
+            GucFlags::default(),
+        );
+        GucRegistry::define_int_guc(
+            c"pagecopy.debug_corrupt_index_tree_offset",
+            c"Byte offset to corrupt in the incoming index tree page (debug)",
+            c"Flips the byte at this offset of the block chosen by \
+             pagecopy.debug_corrupt_index_tree_block. -1 disables.",
+            &DEBUG_CORRUPT_INDEX_TREE_OFFSET,
             -1,
             8191,
             GucContext::Suset,
