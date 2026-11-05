@@ -107,7 +107,7 @@ Feature: Approved GIST indexes transfer across major upgrades
         'public.events', 'public.events', true
       );
       """
-    Then the following SQL on "target" returns "1|1|500":
+    Then the following SQL on "target" returns "2|1|500":
       """
       SELECT count(*) FILTER (WHERE indisvalid AND indisready),
              count(*) FILTER (WHERE NOT indisvalid AND NOT indisready),

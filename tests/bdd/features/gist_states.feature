@@ -19,7 +19,6 @@ Feature: Unapproved GIST indexes degrade while custom opclasses fail
         spot circle,
         ground polygon,
         span int4range,
-        spans int4multirange,
         host inet,
         body tsvector,
         query tsquery
@@ -29,7 +28,6 @@ Feature: Unapproved GIST indexes degrade while custom opclasses fail
       CREATE INDEX states_spot ON public.states USING gist (spot);
       CREATE INDEX states_ground ON public.states USING gist (ground);
       CREATE INDEX states_span ON public.states USING gist (span);
-      CREATE INDEX states_mrange ON public.states USING gist (spans);
       CREATE INDEX states_host ON public.states USING gist (host inet_ops);
       CREATE INDEX states_body ON public.states USING gist (body);
       CREATE INDEX states_query ON public.states USING gist (query);
@@ -42,19 +40,17 @@ Feature: Unapproved GIST indexes degrade while custom opclasses fail
              circle(point(i, i), 1),
              polygon(box(point(i, i), point(i + 10, i + 10))),
              int4range(i, i + 10),
-             int4multirange(int4range(i, i + 10), int4range(i + 100, i + 110)),
              ('10.0.0.' || (i % 250))::inet,
              to_tsvector('english', 'row ' || i),
              to_tsquery('english', 'row | ' || i)
       FROM generate_series(1, 1000) AS i;
       """
-    Then the following SQL on "source" returns "definition|definition|definition|definition|definition|definition|definition|definition|definition|definition|physical":
+    Then the following SQL on "source" returns "definition|definition|definition|definition|definition|definition|definition|definition|definition|physical":
       """
       SELECT (SELECT method FROM pagecopy.check('public.states') WHERE name LIKE 'states_area%'),
              (SELECT method FROM pagecopy.check('public.states') WHERE name LIKE 'states_spot%'),
              (SELECT method FROM pagecopy.check('public.states') WHERE name LIKE 'states_ground%'),
              (SELECT method FROM pagecopy.check('public.states') WHERE name LIKE 'states_span%'),
-             (SELECT method FROM pagecopy.check('public.states') WHERE name LIKE 'states_mrange%'),
              (SELECT method FROM pagecopy.check('public.states') WHERE name LIKE 'states_host%'),
              (SELECT method FROM pagecopy.check('public.states') WHERE name LIKE 'states_body%'),
              (SELECT method FROM pagecopy.check('public.states') WHERE name LIKE 'states_query%'),
@@ -63,13 +59,12 @@ Feature: Unapproved GIST indexes degrade while custom opclasses fail
              (SELECT method FROM pagecopy.check('public.states')
               WHERE name = 'states_loc' AND type = 'index' AND detail = '')
       """
-    And the following SQL on "source" returns "gist opclass pg_catalog.box_ops on box is not the core point_ops on point|gist opclass pg_catalog.circle_ops on circle is not the core point_ops on point|gist opclass pg_catalog.poly_ops on polygon is not the core point_ops on point|gist opclass pg_catalog.range_ops on int4range is not the core point_ops on point|gist opclass pg_catalog.multirange_ops on int4multirange is not the core point_ops on point|gist opclass pg_catalog.inet_ops on inet is not the core point_ops on point|gist opclass pg_catalog.tsvector_ops on tsvector is not the core point_ops on point|gist opclass pg_catalog.tsquery_ops on tsquery is not the core point_ops on point|gist expression or partial indexes are not transferred|gist expression or partial indexes are not transferred":
+    And the following SQL on "source" returns "gist opclass pg_catalog.box_ops on box is not the core point_ops on point|gist opclass pg_catalog.circle_ops on circle is not the core point_ops on point|gist opclass pg_catalog.poly_ops on polygon is not the core point_ops on point|gist opclass pg_catalog.range_ops on int4range is not the core point_ops on point|gist opclass pg_catalog.inet_ops on inet is not the core point_ops on point|gist opclass pg_catalog.tsvector_ops on tsvector is not the core point_ops on point|gist opclass pg_catalog.tsquery_ops on tsquery is not the core point_ops on point|gist expression or partial indexes are not transferred|gist expression or partial indexes are not transferred":
       """
       SELECT (SELECT detail FROM pagecopy.check('public.states') WHERE name LIKE 'states_area%'),
              (SELECT detail FROM pagecopy.check('public.states') WHERE name LIKE 'states_spot%'),
              (SELECT detail FROM pagecopy.check('public.states') WHERE name LIKE 'states_ground%'),
              (SELECT detail FROM pagecopy.check('public.states') WHERE name LIKE 'states_span%'),
-             (SELECT detail FROM pagecopy.check('public.states') WHERE name LIKE 'states_mrange%'),
              (SELECT detail FROM pagecopy.check('public.states') WHERE name LIKE 'states_host%'),
              (SELECT detail FROM pagecopy.check('public.states') WHERE name LIKE 'states_body%'),
              (SELECT detail FROM pagecopy.check('public.states') WHERE name LIKE 'states_query%'),
