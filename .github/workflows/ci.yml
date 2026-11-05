@@ -40,13 +40,21 @@ jobs:
       - name: Publish toolchain image
         run: |
           tag=$(cat Dockerfile .github/workflows/images.yml | sha256sum | cut -c1-16)
-          if docker pull "$BUILDER_IMAGE:$tag"; then
+          image="$BUILDER_IMAGE:$tag"
+          if docker pull "$image"; then
             echo "cache image already published"
             exit 0
           fi
-          docker build --target toolchain --build-arg PG_VERSION=${{ matrix.pg }} \
-            -t "$BUILDER_IMAGE:$tag" .
-          docker push "$BUILDER_IMAGE:$tag" \
+          # BUILDKIT_INLINE_CACHE embeds cache metadata so the matrix jobs'
+          # --cache-from actually restores these layers; without it the
+          # image exists but restores zero layers and every run reinstalls
+          # the toolchain from apt.
+          docker build --target toolchain \
+            --cache-from "$image" \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --build-arg PG_VERSION=${{ matrix.pg }} \
+            -t "$image" .
+          docker push "$image" \
             || echo "push failed (fork PR read-only token?); matrix will build from source"
 
   postgres-matrix:
